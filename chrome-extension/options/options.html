@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SwiftCareer - Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1>SwiftCareer Settings</h1>
+      <p class="subtitle">Configure your Supabase connection</p>
+    </header>
+
+    <main class="main-content">
+      <!-- Supabase Configuration -->
+      <section class="section">
+        <h2>Supabase Configuration</h2>
+        <p class="section-description">
+          Supabase is pre-configured. You can override these settings if needed. Default values are already set.
+        </p>
+
+        <form id="configForm">
+          <div class="form-group">
+            <label for="supabaseUrl">Supabase URL</label>
+            <input 
+              type="url" 
+              id="supabaseUrl" 
+              placeholder="https://your-project.supabase.co"
+              required
+            >
+            <small class="form-help">Your Supabase project URL</small>
+          </div>
+
+          <div class="form-group">
+            <label for="supabaseAnonKey">Supabase Anon Key</label>
+            <input 
+              type="password" 
+              id="supabaseAnonKey" 
+              placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+              required
+            >
+            <button type="button" id="toggleKey" class="toggle-key" aria-label="Show/Hide key">
+              👁
+            </button>
+            <small class="form-help">Your Supabase anon/public key</small>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Save Configuration</button>
+            <button type="button" id="testConnection" class="btn btn-secondary">Test Connection</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- DeepSeek API Configuration -->
+      <section class="section">
+        <h2>DeepSeek API Configuration</h2>
+        <p class="section-description">
+          Configure your DeepSeek API key for CV, Cover Letter, and Interview QA generation.
+        </p>
+
+        <form id="deepseekForm">
+          <div class="form-group">
+            <label for="deepseekApiKey">DeepSeek API Key</label>
+            <input 
+              type="password" 
+              id="deepseekApiKey" 
+              placeholder="sk-..."
+            >
+            <button type="button" id="toggleDeepSeekKey" class="toggle-key" aria-label="Show/Hide key">
+              👁
+            </button>
+            <small class="form-help">Your DeepSeek API key for AI content generation</small>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Save DeepSeek Key</button>
+          </div>
+        </form>
+
+        <!-- Messages -->
+        <div id="deepseekMessage" class="message hidden"></div>
+        </form>
+
+        <!-- Messages -->
+        <div id="message" class="message hidden"></div>
+      </section>
+
+      <!-- Authentication Status -->
+      <section class="section">
+        <h2>Authentication Status</h2>
+        <div id="authStatus" class="auth-status">
+          <div class="status-item">
+            <span class="status-label">Status:</span>
+            <span id="authStatusText" class="status-value">Checking...</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">User:</span>
+            <span id="authUserEmail" class="status-value">-</span>
+          </div>
+          <div class="auth-actions">
+            <button id="signInBtn" class="btn btn-primary">Sign In</button>
+            <button id="signOutBtn" class="btn btn-secondary hidden">Sign Out</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Instructions -->
+      <section class="section">
+        <h2>How to Get Your Supabase Credentials</h2>
+        <ol class="instructions">
+          <li>Go to your <a href="https://app.supabase.com" target="_blank">Supabase Dashboard</a></li>
+          <li>Select your project</li>
+          <li>Go to <strong>Settings</strong> → <strong>API</strong></li>
+          <li>Copy the <strong>Project URL</strong> and paste it in the URL field above</li>
+          <li>Copy the <strong>anon public</strong> key and paste it in the Anon Key field above</li>
+          <li>Click <strong>Save Configuration</strong></li>
+        </ol>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>SwiftCareer Extension v1.0.0</p>
+    </footer>
+  </div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>

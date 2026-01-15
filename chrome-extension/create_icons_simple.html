@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>SwiftCareer Icon Generator</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      background: white;
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    h1 {
+      color: #0A66C2;
+      margin-bottom: 20px;
+    }
+    canvas {
+      border: 1px solid #ddd;
+      margin: 10px;
+      display: block;
+    }
+    button {
+      background: #0A66C2;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+      margin: 10px 5px;
+    }
+    button:hover {
+      background: #004182;
+    }
+    .preview {
+      display: flex;
+      gap: 20px;
+      margin: 20px 0;
+      flex-wrap: wrap;
+    }
+    .preview-item {
+      text-align: center;
+    }
+    .preview-item label {
+      display: block;
+      margin-top: 5px;
+      font-size: 12px;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>SwiftCareer Extension Icon Generator</h1>
+    <p>Click the button below to generate and download all three icon sizes.</p>
+    
+    <div class="preview">
+      <div class="preview-item">
+        <canvas id="canvas16" width="16" height="16"></canvas>
+        <label>16x16</label>
+      </div>
+      <div class="preview-item">
+        <canvas id="canvas48" width="48" height="48"></canvas>
+        <label>48x48</label>
+      </div>
+      <div class="preview-item">
+        <canvas id="canvas128" width="128" height="128"></canvas>
+        <label>128x128</label>
+      </div>
+    </div>
+    
+    <button onclick="generateAndDownload()">Generate & Download Icons</button>
+    <p style="margin-top: 20px; color: #666; font-size: 14px;">
+      After downloading, move the files to the <code>chrome-extension/icons/</code> folder.
+    </p>
+  </div>
+
+  <script>
+    function createIcon(size, canvasId) {
+      const canvas = document.getElementById(canvasId);
+      const ctx = canvas.getContext('2d');
+      
+      // Background - LinkedIn blue
+      ctx.fillStyle = '#0A66C2';
+      ctx.fillRect(0, 0, size, size);
+      
+      // Draw "S" letter
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = `bold ${Math.floor(size * 0.65)}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('S', size / 2, size / 2);
+      
+      return canvas;
+    }
+    
+    function downloadCanvas(canvas, filename) {
+      canvas.toBlob(function(blob) {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      });
+    }
+    
+    function generateAndDownload() {
+      // Generate icons
+      const sizes = [
+        { size: 16, id: 'canvas16', name: 'icon16.png' },
+        { size: 48, id: 'canvas48', name: 'icon48.png' },
+        { size: 128, id: 'canvas128', name: 'icon128.png' }
+      ];
+      
+      sizes.forEach((item, index) => {
+        createIcon(item.size, item.id);
+        // Download with slight delay to avoid browser blocking
+        setTimeout(() => {
+          downloadCanvas(document.getElementById(item.id), item.name);
+        }, index * 300);
+      });
+      
+      alert('Icons generated! Check your downloads folder.');
+    }
+    
+    // Preview on load
+    window.onload = function() {
+      createIcon(16, 'canvas16');
+      createIcon(48, 'canvas48');
+      createIcon(128, 'canvas128');
+    };
+  </script>
+</body>
+</html>

@@ -1,0 +1,150 @@
+/**
+ * Content Script Styles
+ * LinkedIn-style button design
+ */
+
+.swiftcareer-button-wrapper {
+  display: inline-block;
+  margin-left: 8px;
+}
+
+.swiftcareer-send-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background-color: #0A66C2;
+  color: #ffffff;
+  border: none;
+  border-radius: 24px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  cursor: pointer;
+  transition: all 0.2s ease-in-out;
+  white-space: nowrap;
+  min-height: 40px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.swiftcareer-send-button:hover:not(:disabled) {
+  background-color: #004182;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+  transform: translateY(-1px);
+}
+
+.swiftcareer-send-button:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.swiftcareer-send-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.swiftcareer-button-icon {
+  font-size: 16px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+
+.swiftcareer-button-text {
+  line-height: 1;
+}
+
+/* Loading state */
+.swiftcareer-send-button.loading {
+  background-color: #0A66C2;
+  position: relative;
+}
+
+.swiftcareer-send-button.loading .swiftcareer-button-icon {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Success state */
+.swiftcareer-send-button.success {
+  background-color: #057642;
+  animation: successPulse 0.3s ease-in-out;
+}
+
+@keyframes successPulse {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.swiftcareer-send-button.success .swiftcareer-button-icon {
+  font-size: 18px;
+}
+
+/* Already sent state */
+.swiftcareer-send-button.already-sent {
+  background-color: #666666;
+  cursor: default;
+}
+
+.swiftcareer-send-button.already-sent:hover {
+  background-color: #666666;
+  transform: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+/* Error state */
+.swiftcareer-send-button.error {
+  background-color: #C8102E;
+  animation: errorShake 0.3s ease-in-out;
+}
+
+@keyframes errorShake {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-4px);
+  }
+  75% {
+    transform: translateX(4px);
+  }
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .swiftcareer-send-button {
+    padding: 6px 12px;
+    font-size: 12px;
+    min-height: 36px;
+  }
+  
+  .swiftcareer-button-icon {
+    font-size: 14px;
+  }
+}
+
+/* Ensure button doesn't break LinkedIn layout */
+.swiftcareer-button-wrapper {
+  vertical-align: middle;
+}
+
+/* Match LinkedIn's button spacing */
+.swiftcareer-send-button {
+  margin: 0 4px;
+}

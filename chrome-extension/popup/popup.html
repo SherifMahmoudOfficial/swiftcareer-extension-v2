@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SwiftCareer - Sign In</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <div class="header">
+      <h1>SwiftCareer</h1>
+      <p class="subtitle">LinkedIn Job Analyzer</p>
+    </div>
+
+    <!-- Auth Status -->
+    <div id="authStatus" class="auth-status hidden">
+      <div class="status-message">
+        <span class="status-icon">✓</span>
+        <span class="status-text">Signed in as <span id="userEmail"></span></span>
+      </div>
+      <button id="signOutBtn" class="btn btn-secondary">Sign Out</button>
+    </div>
+
+    <!-- Auth Form -->
+    <div id="authForm" class="auth-form">
+      <div class="tabs">
+        <button class="tab active" data-tab="signin">Sign In</button>
+        <button class="tab" data-tab="signup">Sign Up</button>
+      </div>
+
+      <!-- Sign In Tab -->
+      <div id="signinTab" class="tab-content active">
+        <form id="signinForm">
+          <div class="form-group">
+            <label for="signinEmail">Email</label>
+            <input type="email" id="signinEmail" required autocomplete="email">
+          </div>
+          <div class="form-group">
+            <label for="signinPassword">Password</label>
+            <input type="password" id="signinPassword" required autocomplete="current-password">
+          </div>
+          <button type="submit" class="btn btn-primary">Sign In</button>
+        </form>
+      </div>
+
+      <!-- Sign Up Tab -->
+      <div id="signupTab" class="tab-content">
+        <form id="signupForm">
+          <div class="form-group">
+            <label for="signupEmail">Email</label>
+            <input type="email" id="signupEmail" required autocomplete="email">
+          </div>
+          <div class="form-group">
+            <label for="signupPassword">Password</label>
+            <input type="password" id="signupPassword" required autocomplete="new-password" minlength="6">
+            <small class="form-help">Minimum 6 characters</small>
+          </div>
+          <button type="submit" class="btn btn-primary">Sign Up</button>
+        </form>
+      </div>
+
+      <!-- Error Message -->
+      <div id="errorMessage" class="error-message hidden"></div>
+
+      <!-- Success Message -->
+      <div id="successMessage" class="success-message hidden"></div>
+    </div>
+
+    <!-- Loading State -->
+    <div id="loadingState" class="loading-state hidden">
+      <div class="spinner"></div>
+      <p>Processing...</p>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <a href="#" id="optionsLink">Settings</a>
+    </div>
+  </div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
