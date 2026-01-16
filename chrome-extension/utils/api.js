@@ -5,91 +5,356 @@
 
 import { getSupabaseClient, getAccessToken } from './supabase.js';
 import { Storage } from './storage.js';
+import { hasEnoughCredits, deductCredits } from './credits_service.js';
+import { calculateJobAnalysisCost, calculateCostFromUsage, costToCredits } from './cost_calculator.js';
+import { deepSeekJsonObject, isDeepSeekConfigured } from './deepseek_client.js';
 
 /**
- * Call job_analysis edge function
+ * Simple URL detection
  */
-export async function callJobAnalysis(jobUrl, userId, userSkills = [], userProfile = {}) {
-  console.log('[API] 🚀 Starting job analysis API call');
-  
-  // Get Supabase config (with defaults)
-  const config = await Storage.getMultiple(['supabaseUrl', 'supabaseAnonKey']);
-  const supabaseUrl = (config.supabaseUrl || 'https://xqztrdozodptapqlnyoj.supabase.co').replace(/\/$/, '');
-  const supabaseAnonKey = config.supabaseAnonKey || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhxenRyZG96b2RwdGFwcWxueW9qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ1MDg4OTUsImV4cCI6MjA4MDA4NDg5NX0.bEfbybiz-ncXoCK_DxvjKSLioFVVO3UoG4ztMMYf64o';
-  
-  const apiUrl = `${supabaseUrl}/functions/v1/job_analysis`;
-  console.log('[API] 📡 Request URL:', apiUrl);
-  
-  const accessToken = await getAccessToken();
+function isLinkedInUrl(input) {
+  const trimmed = input.trim().toLowerCase();
+  return trimmed.includes('linkedin.com/jobs/');
+}
 
-  if (!accessToken) {
-    console.error('[API] ❌ No access token found');
-    throw new Error('Not authenticated. Please sign in.');
+/**
+ * Extract skills from job description using DeepSeek
+ */
+async function extractSkillsFromJobDescription(description) {
+  console.log('[API] 🤖 Extracting skills from job description');
+  
+  const systemPrompt = `You are a skill extraction expert. Extract all technical skills, soft skills, tools, and technologies mentioned in the job description. Return ONLY valid JSON.`;
+  
+  const userPrompt = `Extract all skills from this job description:\n\n${description}\n\nReturn JSON: { "skills": ["skill1", "skill2", ...] }`;
+
+  const result = await deepSeekJsonObject({
+    systemPrompt,
+    userPrompt,
+    temperature: 0.3,
+    label: 'Extract Skills'
+  });
+
+  return {
+    skills: result.parsed.skills || [],
+    usage: result.usage
+  };
+}
+
+/**
+ * Parse job description using DeepSeek
+ */
+async function parseJobDescription(jobDescription) {
+  console.log('[API] 🤖 Parsing job description');
+  
+  const systemPrompt = `You are a job description parser. Extract structured information from job postings. Return ONLY valid JSON.`;
+  
+  const userPrompt = `Parse this job description and extract:
+
+${jobDescription}
+
+Return JSON with this structure:
+{
+  "title": "job title",
+  "company": "company name",
+  "location": "location",
+  "experienceLevel": "Entry level/Mid-Senior level/etc",
+  "employmentType": "Full-time/Part-time/Contract/etc",
+  "description": "full job description",
+  "jobFunctions": ["function1", "function2"],
+  "industries": ["industry1", "industry2"],
+  "skills": ["skill1", "skill2"]
+}`;
+
+  const result = await deepSeekJsonObject({
+    systemPrompt,
+    userPrompt,
+    temperature: 0.3,
+    label: 'Parse Job'
+  });
+
+  return {
+    parsed: result.parsed,
+    usage: result.usage
+  };
+}
+
+/**
+ * Calculate skill match using DeepSeek
+ */
+async function calculateSkillMatch(userSkills, jobSkills, jobDescription) {
+  console.log('[API] 🤖 Calculating skill match');
+  
+  const systemPrompt = `You are a professional skill matching expert. Analyze how well a candidate's skills match job requirements. Consider:
+1. Direct skill matches (exact or similar terms)
+2. Transferable skills (related skills that could apply)
+3. Skill gaps (missing required skills)
+4. How to rephrase existing skills to better match job requirements
+
+Return ONLY valid JSON with this structure:
+{
+  "matchPercentage": number (0-100),
+  "matchingSkills": ["skill1", "skill2"],
+  "reasoning": "detailed explanation of the match",
+  "suggestedSkills": ["missing skill 1", "missing skill 2"],
+  "improvedSkills": [
+    {"original": "user's existing skill", "improved": "rephrased to better match job requirements"}
+  ],
+  "projectedMatchPercentage": number (expected match after improvements, 0-100)
+}`;
+
+  const userPrompt = `Analyze skill match:
+
+User Skills: ${userSkills.join(', ')}
+
+Job Required Skills: ${jobSkills.join(', ')}
+
+Job Description:
+${jobDescription}
+
+Calculate:
+1. Match percentage based on direct and transferable skills
+2. List all matching skills (including synonyms/related skills)
+3. Provide reasoning for the match score
+4. Suggest missing skills the user should add to improve match
+5. For user's existing skills that partially match, rephrase them to better align with job terminology (e.g., "Python" → "Python (Advanced - Data Analysis)")
+6. Estimate projected match if user improves their profile
+
+Return the analysis as JSON.`;
+
+  const result = await deepSeekJsonObject({
+    systemPrompt,
+    userPrompt,
+    temperature: 0.4,
+    label: 'Skill Match'
+  });
+
+  const parsed = result.parsed;
+  
+  return {
+    matchPercentage: Math.max(0, Math.min(100, parsed.matchPercentage || 0)),
+    matchingSkills: parsed.matchingSkills || [],
+    reasoning: parsed.reasoning || '',
+    suggestedSkills: parsed.suggestedSkills || [],
+    improvedSkills: parsed.improvedSkills || [],
+    projectedMatchPercentage: Math.max(0, Math.min(100, parsed.projectedMatchPercentage || 0)),
+    usage: result.usage
+  };
+}
+
+/**
+ * Call job analysis locally using DeepSeek (no backend)
+ * Matches Flutter logic exactly
+ */
+export async function callJobAnalysis(jobInput, userId, userSkills = [], userProfile = {}) {
+  console.log('[API] 🚀 Starting local job analysis (client-side)');
+  
+  // Check if DeepSeek is configured
+  const isConfigured = await isDeepSeekConfigured();
+  if (!isConfigured) {
+    throw new Error('DeepSeek API key not configured. Please set it in Settings.');
+  }
+  
+  // Check credits before starting (require at least 1 credit)
+  const canStart = await hasEnoughCredits(1, userId);
+  if (!canStart) {
+    console.error('[API] ❌ Insufficient credits');
+    throw new Error('INSUFFICIENT_CREDITS');
   }
 
-  const requestBody = {
-    jobInput: jobUrl,
-    userId,
-    userSkills,
-    userProfile
-  };
+  const isLinkedIn = isLinkedInUrl(jobInput);
+  console.log('[API] 📋 Input type:', { isLinkedIn, inputLength: jobInput.length });
+  
+  let jobData;
+  let jobSkills = [];
+  const tokenUsageOperations = [];
+  let usedApify = false;
 
-  console.log('[API] 📤 Request body:', {
-    jobInput: typeof jobUrl === 'string' && jobUrl.length > 100 ? `${jobUrl.substring(0, 100)}... (${jobUrl.length} chars)` : jobUrl,
-    userId,
-    userSkillsCount: userSkills.length,
-    userProfile: {
-      fullName: userProfile.fullName,
-      email: userProfile.email,
-      hasHeadline: !!userProfile.headline,
-      hasSummary: !!userProfile.summary
+  // For LinkedIn URLs, we'll treat the input as text (user should paste description)
+  // In future, we can add content script to extract from page
+  let jobDescription = jobInput;
+  
+  if (isLinkedIn) {
+    // For now, treat LinkedIn URL as text input
+    // User should paste the job description
+    console.log('[API] ⚠️ LinkedIn URL detected - treating as text input. User should paste job description.');
+    jobDescription = jobInput;
+  }
+
+  // Parse job description
+  console.log('[API] 📝 Parsing job description');
+  const parseResult = await parseJobDescription(jobDescription);
+  const parsedJob = parseResult.parsed;
+  tokenUsageOperations.push({ operation: 'parse_job', usage: parseResult.usage });
+  
+  // Deduct credits for parse_job operation
+  try {
+    const parseCost = calculateCostFromUsage(parseResult.usage, 'Job Analysis: parse_job');
+    const parseCredits = parseCost.credits;
+    if (parseCredits > 0) {
+      const deducted = await deductCredits({
+        credits: parseCredits,
+        reason: 'Job Analysis: parse_job',
+        userId: userId,
+        source: 'deepseek',
+        costDollars: parseCost.totalCost
+      });
+      if (deducted) {
+        console.log('[API] ✅ Credits deducted for parse_job:', parseCredits);
+      } else {
+        console.error('[API] ⚠️ Failed to deduct credits for parse_job');
+      }
     }
-  });
+  } catch (parseCreditError) {
+    console.error('[API] ❌ Error deducting credits for parse_job:', parseCreditError);
+  }
+  
+  jobData = {
+    jobInfo: {
+      title: parsedJob.title || '',
+      company: parsedJob.company || '',
+      description: parsedJob.description || jobDescription,
+      location: parsedJob.location || '',
+      experienceLevel: parsedJob.experienceLevel || '',
+      employmentType: parsedJob.employmentType || '',
+      jobFunctions: parsedJob.jobFunctions || [],
+      industries: parsedJob.industries || [],
+      skills: parsedJob.skills || []
+    },
+    companyInfo: {
+      name: parsedJob.company || '',
+      description: '',
+      industry: parsedJob.industries?.[0] || '',
+      companySize: '',
+      websiteUrl: '',
+      linkedInUrl: ''
+    }
+  };
+  
+  // Extract skills if not in parsed job
+  if (parsedJob.skills && parsedJob.skills.length > 0) {
+    jobSkills = parsedJob.skills;
+    console.log('[API] ✅ Using skills from parsed job:', { count: jobSkills.length });
+  } else {
+    console.log('[API] 🔍 No skills in parsed job, extracting from description...');
+    const skillsResult = await extractSkillsFromJobDescription(jobDescription);
+    jobSkills = skillsResult.skills;
+    tokenUsageOperations.push({ operation: 'extract_skills', usage: skillsResult.usage });
+    console.log('[API] ✅ Extracted skills:', { count: jobSkills.length });
+    
+    // Deduct credits for extract_skills operation
+    try {
+      const skillsCost = calculateCostFromUsage(skillsResult.usage, 'Job Analysis: extract_skills');
+      const skillsCredits = skillsCost.credits;
+      if (skillsCredits > 0) {
+        const deducted = await deductCredits({
+          credits: skillsCredits,
+          reason: 'Job Analysis: extract_skills',
+          userId: userId,
+          source: 'deepseek',
+          costDollars: skillsCost.totalCost
+        });
+        if (deducted) {
+          console.log('[API] ✅ Credits deducted for extract_skills:', skillsCredits);
+        } else {
+          console.error('[API] ⚠️ Failed to deduct credits for extract_skills');
+        }
+      }
+    } catch (skillsCreditError) {
+      console.error('[API] ❌ Error deducting credits for extract_skills:', skillsCreditError);
+    }
+  }
 
-  const requestHeaders = {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${accessToken}`,
-    'apikey': supabaseAnonKey
+  // Calculate skill match
+  let matchAnalysis = null;
+  if (userSkills && userSkills.length > 0) {
+    console.log('[API] 🎯 Calculating skill match');
+    matchAnalysis = await calculateSkillMatch(userSkills, jobSkills, jobDescription);
+    tokenUsageOperations.push({ operation: 'skill_match', usage: matchAnalysis.usage });
+    
+    // Deduct credits for skill_match operation
+    try {
+      const matchCost = calculateCostFromUsage(matchAnalysis.usage, 'Job Analysis: skill_match');
+      const matchCredits = matchCost.credits;
+      if (matchCredits > 0) {
+        const deducted = await deductCredits({
+          credits: matchCredits,
+          reason: 'Job Analysis: skill_match',
+          userId: userId,
+          source: 'deepseek',
+          costDollars: matchCost.totalCost
+        });
+        if (deducted) {
+          console.log('[API] ✅ Credits deducted for skill_match:', matchCredits);
+        } else {
+          console.error('[API] ⚠️ Failed to deduct credits for skill_match');
+        }
+      }
+    } catch (matchCreditError) {
+      console.error('[API] ❌ Error deducting credits for skill_match:', matchCreditError);
+    }
+  }
+
+  // Calculate total token usage
+  const totalUsage = tokenUsageOperations.reduce((acc, op) => {
+    return {
+      prompt_tokens: acc.prompt_tokens + (op.usage.prompt_tokens || 0),
+      completion_tokens: acc.completion_tokens + (op.usage.completion_tokens || 0),
+      total_tokens: acc.total_tokens + (op.usage.total_tokens || 0),
+      cached_tokens: (acc.cached_tokens || 0) + (op.usage.cached_tokens || 0)
+    };
+  }, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cached_tokens: 0 });
+
+  const tokenUsage = {
+    total: totalUsage,
+    operations: tokenUsageOperations
   };
 
-  console.log('[API] 📋 Request headers:', {
-    'Content-Type': requestHeaders['Content-Type'],
-    'Authorization': `Bearer ${accessToken.substring(0, 20)}... (token length: ${accessToken.length})`,
-    'apikey': `${supabaseAnonKey.substring(0, 20)}... (key length: ${supabaseAnonKey.length})`
-  });
+  // Build response structure (same as edge function)
+  const analysisResult = {
+    jobData,
+    matchAnalysis: matchAnalysis || {
+      matchPercentage: 0,
+      matchingSkills: [],
+      reasoning: 'No user skills provided',
+      suggestedSkills: [],
+      improvedSkills: [],
+      projectedMatchPercentage: 0
+    },
+    jobSkills,
+    isLinkedInUrl: isLinkedIn,
+    tokenUsage: tokenUsage,
+    usedApify: usedApify
+  };
 
-  const response = await fetch(apiUrl, {
-    method: 'POST',
-    headers: requestHeaders,
-    body: JSON.stringify(requestBody)
-  });
-
-  console.log('[API] 📥 Response status:', response.status, response.statusText);
-  console.log('[API] 📥 Response headers:', Object.fromEntries(response.headers.entries()));
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    console.error('[API] ❌ Response error:', errorData);
-    throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
-  }
-
-  const data = await response.json();
-  console.log('[API] 📥 Response data:', {
-    success: data.success,
-    hasData: !!data.data,
-    hasJobData: !!data.data?.jobData,
-    hasMatchAnalysis: !!data.data?.matchAnalysis,
-    jobSkillsCount: data.data?.jobSkills?.length || 0,
-    isLinkedInUrl: data.data?.isLinkedInUrl
-  });
+  // Calculate total credits used (sum of per-operation deductions)
+  // Note: Credits are already deducted per operation above, this is just for tracking
+  let totalCreditsUsed = 0;
+  const creditsUsedBreakdown = {};
   
-  if (!data.success) {
-    console.error('[API] ❌ API returned success: false:', data.error);
-    throw new Error(data.error || 'Job analysis failed');
+  // Calculate breakdown for reporting (credits already deducted above)
+  for (const op of tokenUsageOperations) {
+    try {
+      const opCost = calculateCostFromUsage(op.usage, `Job Analysis: ${op.operation}`);
+      const opCredits = opCost.credits;
+      totalCreditsUsed += opCredits;
+      creditsUsedBreakdown[op.operation] = opCredits;
+    } catch (e) {
+      console.error(`[API] ❌ Error calculating credits for ${op.operation}:`, e);
+    }
   }
+  
+  // Store breakdown and total
+  analysisResult.creditsUsed = totalCreditsUsed;
+  analysisResult.creditsUsedBreakdown = creditsUsedBreakdown;
+  
+  console.log('[API] 💰 Total credits used for job analysis:', {
+    totalCredits: totalCreditsUsed,
+    breakdown: creditsUsedBreakdown,
+    operations: tokenUsageOperations.length
+  });
 
-  console.log('[API] ✅ Job analysis API call completed successfully');
-  return data.data;
+  console.log('[API] ✅ Job analysis completed successfully');
+  return analysisResult;
 }
 
 /**
@@ -309,6 +574,38 @@ export async function createChatMessage(threadId, role, content, metadata = null
 }
 
 /**
+ * Create a portfolio message in chat_messages (assistant bubble).
+ * Mirrors Flutter's persisted metadata shape for portfolio.
+ */
+export async function createPortfolioMessage(
+  threadId,
+  portfolioUrl,
+  portfolioTitle,
+  creditsUsed,
+  userId,
+  extra = null
+) {
+  const metadata = {
+    type: 'portfolio',
+    portfolio_url: portfolioUrl,
+    portfolio_title: portfolioTitle,
+    credits_used: creditsUsed || 0,
+    ...(extra && typeof extra === 'object' ? extra : {})
+  };
+
+  const content =
+    'Your animated portfolio landing page is ready! Click the button below to open it in a new tab.';
+
+  return await createChatMessage(
+    threadId,
+    'assistant',
+    content,
+    metadata,
+    userId
+  );
+}
+
+/**
  * Create all job analysis messages (user, analyzing, job_results, match_analysis/missing_skills)
  */
 export async function createJobAnalysisMessages(threadId, jobDescription, analysisResult, userSkills, jobUrl = '', userId) {
@@ -344,31 +641,42 @@ export async function createJobAnalysisMessages(threadId, jobDescription, analys
     
     const jobInfo = analysisResult.jobData?.jobInfo || {};
     const matchAnalysis = analysisResult.matchAnalysis || {};
+    const creditsUsed = analysisResult.creditsUsed || 0;
     
     // 3. Job Results Message
     console.log('[API] 📝 Creating job_results message');
+    // IMPORTANT: Flutter expects metadata.jobAnalysis to contain a nested jobResult map.
+    // Keep this shape aligned with `careerpro/lib/pages/chat/chat_workspace_page.dart`
+    // restore logic (it casts jobAnalysis['jobResult'] to Map<String, dynamic>).
+    const jobResultPayload = {
+      title: jobInfo.title || '',
+      company: jobInfo.company || '',
+      location: jobInfo.location || '',
+      level: jobInfo.experienceLevel || '',
+      remote: false, // Can be extracted from jobInfo if available
+      type: jobInfo.employmentType || ''
+    };
+    const jobAnalysisPayload = {
+      jobResult: jobResultPayload,
+      jobLink: jobUrl || '',
+      jobDescription: jobInfo.description || jobDescription,
+      jobSkills: analysisResult.jobSkills || [],
+      userSkills: userSkills || [],
+      skills: jobInfo.skills || analysisResult.jobSkills || [],
+      // Flutter restore expects these keys; provide safe defaults for extension threads.
+      people: [],
+      introMessage: null
+    };
     const jobResultsMessage = await createChatMessage(
       threadId,
       'assistant',
       'Job analyzed successfully',
       {
         type: 'job_results',
-        jobResult: {
-          title: jobInfo.title || '',
-          company: jobInfo.company || '',
-          location: jobInfo.location || '',
-          level: jobInfo.experienceLevel || '',
-          remote: false, // Can be extracted from jobInfo if available
-          type: jobInfo.employmentType || ''
-        },
-        jobAnalysis: {
-          jobDescription: jobInfo.description || jobDescription,
-          jobSkills: analysisResult.jobSkills || [],
-          userSkills: userSkills || [],
-          skills: jobInfo.skills || analysisResult.jobSkills || []
-        },
+        jobResult: jobResultPayload,
+        jobAnalysis: jobAnalysisPayload,
         jobLink: jobUrl || '',
-        credits_used: 0
+        credits_used: creditsUsed
       },
       userId
     );
@@ -388,13 +696,23 @@ export async function createJobAnalysisMessages(threadId, jobDescription, analys
     } else {
       console.log('[API] 📝 Creating match_analysis message');
       
-      // Transform improvedSkills from Edge Function format to required format
-      // Edge Function returns: Array<{skill: string, suggestion: string}>
-      // Required format: Array<{original: string, improved: string}>
-      const improvedSkills = (matchAnalysis.improvedSkills || []).map(item => ({
-        original: item.skill || item.original || '',
-        improved: item.suggestion || item.improved || ''
-      })).filter(item => item.original && item.improved); // Filter out empty items
+      // Transform improvedSkills to required format: Array<{original: string, improved: string}>
+      // Handles multiple formats for compatibility:
+      // - New format: {original, improved} (preferred)
+      // - Legacy format: {skill, suggestion}
+      // - Plain strings: use same text for both fields (like Flutter)
+      const improvedSkills = (matchAnalysis.improvedSkills || []).map(item => {
+        // Handle string items (same as Flutter - use string for both fields)
+        if (typeof item === 'string') {
+          const text = item.trim();
+          return { original: text, improved: text };
+        }
+        // Handle object items - prefer {original, improved} format
+        return {
+          original: item.original || item.skill || '',
+          improved: item.improved || item.suggestion || ''
+        };
+      }).filter(item => item.original && item.improved); // Filter out empty items
       
       const matchAnalysisMessage = await createChatMessage(
         threadId,
@@ -411,7 +729,7 @@ export async function createJobAnalysisMessages(threadId, jobDescription, analys
           userSkills: userSkills || [],
           jobSkills: analysisResult.jobSkills || [],
           jobDescription: jobInfo.description || jobDescription,
-          credits_used: 0
+          credits_used: creditsUsed
         },
         userId
       );
@@ -465,6 +783,84 @@ export async function saveCVToDatabase(cvData, userId, threadId, jobUrl, jobTitl
   const client = await getSupabaseClient();
 
   try {
+    // Build a Flutter-compatible tailored_report schema.
+    // Flutter expects: { matchBefore, matchAfter, changes, patch: { summary, skills, highlights, focusSummary, experienceDescriptionsByIndex } }
+    const buildFlutterTailoredReportFromCvData = (rawCvData, overrides = {}) => {
+      const safe = rawCvData || {};
+
+      const toNum = (v) => (typeof v === 'number' ? v : (typeof v === 'string' ? parseInt(v, 10) : 0)) || 0;
+      const toStr = (v) => String(v ?? '').trim();
+
+      const skills = (safe.skills || [])
+        .map((s) => toStr(s))
+        .filter((s) => s.length > 0);
+
+      const highlights = (safe.highlights || [])
+        .map((h) => {
+          if (typeof h === 'string') return h.trim();
+          if (h && typeof h === 'object') return toStr(h.text || h.description || '');
+          return toStr(h);
+        })
+        .filter((h) => h.length > 0);
+
+      const changes = (safe.changes || [])
+        .map((c) => toStr(c))
+        .filter((c) => c.length > 0);
+
+      const experienceDescriptionsByIndex = {};
+      (safe.experiences || []).forEach((exp) => {
+        if (!exp) return;
+        const idx =
+          typeof exp.index === 'number'
+            ? exp.index
+            : (typeof exp.index === 'string' ? parseInt(exp.index, 10) : null);
+        const desc = toStr(exp.description);
+        if (idx === null || Number.isNaN(idx)) return;
+        if (desc.length === 0) return;
+        experienceDescriptionsByIndex[String(idx)] = desc;
+      });
+
+      const matchBefore = overrides.matchBefore ?? safe.matchBefore;
+      const matchAfter = overrides.matchAfter ?? safe.matchAfter;
+      const focusSummary =
+        overrides.focusSummary ??
+        safe.focusSummary ??
+        safe.focus_summary ??
+        null;
+
+      return {
+        matchBefore: toNum(matchBefore),
+        matchAfter: toNum(matchAfter),
+        changes: overrides.changes ?? changes,
+        patch: {
+          summary: toStr(safe.summary),
+          skills,
+          highlights,
+          focusSummary: focusSummary ? toStr(focusSummary) : null,
+          experienceDescriptionsByIndex
+        }
+      };
+    };
+
+    let tailoredReportToStore = tailoredReport;
+    if (tailoredReportToStore && typeof tailoredReportToStore === 'object') {
+      // Convert legacy schema (stored as { tailoredCvData: ... }) to Flutter schema.
+      if (!tailoredReportToStore.patch && tailoredReportToStore.tailoredCvData) {
+        tailoredReportToStore = buildFlutterTailoredReportFromCvData(
+          tailoredReportToStore.tailoredCvData,
+          {
+            matchBefore: tailoredReportToStore.matchBefore,
+            matchAfter: tailoredReportToStore.matchAfter,
+            changes: tailoredReportToStore.changes
+          }
+        );
+      } else if (!tailoredReportToStore.patch) {
+        tailoredReportToStore = buildFlutterTailoredReportFromCvData(cvData);
+      }
+    } else {
+      tailoredReportToStore = buildFlutterTailoredReportFromCvData(cvData);
+    }
+
     // Build CV title
     const cvTitle = companyName && jobTitle ? `${companyName} — ${jobTitle}` : (jobTitle || 'Tailored CV');
 
@@ -479,7 +875,46 @@ export async function saveCVToDatabase(cvData, userId, threadId, jobUrl, jobTitl
     if (cvData.highlights && cvData.highlights.length > 0) {
       cvContent += `Highlights:\n`;
       cvData.highlights.forEach(highlight => {
-        cvContent += `- ${highlight.text}\n`;
+        const text =
+          typeof highlight === 'string'
+            ? highlight
+            : (highlight && typeof highlight === 'object'
+                ? (highlight.text || highlight.description || JSON.stringify(highlight))
+                : String(highlight || ''));
+        if (String(text).trim().length > 0) {
+          cvContent += `- ${text}\n`;
+        }
+      });
+      cvContent += '\n';
+    }
+
+    // Include full sections so consumers (including the extension) can display the updated descriptions.
+    // This mirrors Flutter behavior where the tailored CVData contains updated work experience descriptions.
+    if (Array.isArray(cvData.workExperiences) && cvData.workExperiences.length > 0) {
+      cvContent += 'Work Experiences:\n';
+      cvData.workExperiences.forEach((exp) => {
+        const position = (exp?.position ?? '').toString().trim();
+        const company = (exp?.company ?? '').toString().trim();
+        const startDate = (exp?.startDate ?? '').toString().trim();
+        const endDate = (exp?.endDate ?? '').toString().trim();
+        const desc = (exp?.description ?? '').toString().trim();
+        const header = [position, company].filter(Boolean).join(' at ') || 'Experience';
+        const dates = [startDate, endDate].filter(Boolean).join(' - ');
+        cvContent += `- ${header}${dates ? ` (${dates})` : ''}\n`;
+        if (desc) cvContent += `  ${desc}\n`;
+      });
+      cvContent += '\n';
+    }
+
+    if (Array.isArray(cvData.projects) && cvData.projects.length > 0) {
+      cvContent += 'Projects:\n';
+      cvData.projects.forEach((p) => {
+        const name = (p?.name ?? '').toString().trim() || 'Project';
+        const desc = (p?.description ?? '').toString().trim();
+        const techs = Array.isArray(p?.technologies) ? p.technologies.filter(Boolean).join(', ') : '';
+        cvContent += `- ${name}\n`;
+        if (desc) cvContent += `  ${desc}\n`;
+        if (techs) cvContent += `  Technologies: ${techs}\n`;
       });
       cvContent += '\n';
     }
@@ -490,12 +925,7 @@ export async function saveCVToDatabase(cvData, userId, threadId, jobUrl, jobTitl
       content: cvContent,
       job_url: jobUrl || '',
       thread_id: threadId,
-      tailored_report: tailoredReport || {
-        tailoredCvData: cvData,
-        matchBefore: 0,
-        matchAfter: 0,
-        changes: []
-      }
+      tailored_report: tailoredReportToStore
     };
 
     console.log('[API] 📤 Database insert data (CV):', {
@@ -557,7 +987,7 @@ export async function createCVCoverLetterInterviewQAMessages(threadId, coverLett
           type: 'cover_letter',
           content: coverLetterData.content,
           instructions: coverLetterData.instructions || null,
-          credits_used: 0
+          credits_used: coverLetterData.creditsUsed ?? 0
         },
         userId
       );
@@ -617,6 +1047,10 @@ export async function createCVCoverLetterInterviewQAMessages(threadId, coverLett
       
       // Ensure changes are strings
       const flatChanges = (cvData.changes || []).map(c => String(c || '')).filter(c => c.trim().length > 0);
+
+      // Preserve full sections for rendering (Flutter-style CVData + patch coexist).
+      const fullWorkExperiences = Array.isArray(cvData.workExperiences) ? cvData.workExperiences : [];
+      const fullProjects = Array.isArray(cvData.projects) ? cvData.projects : [];
       
       const cvMetadata = {
         type: 'cv',
@@ -627,9 +1061,11 @@ export async function createCVCoverLetterInterviewQAMessages(threadId, coverLett
         highlights: flatHighlights, // Flat strings for Flutter compatibility
         skills: flatSkills, // Ensure all are strings
         experiences: experiences, // Simple objects with index and description
+        workExperiences: fullWorkExperiences,
+        projects: fullProjects,
         changes: flatChanges, // Flat strings
         isGenerating: false,
-        credits_used: 0
+        credits_used: cvData.creditsUsed ?? 0
       };
       
       console.log('[API] 📝 CV metadata to save:', {
@@ -682,7 +1118,7 @@ export async function createCVCoverLetterInterviewQAMessages(threadId, coverLett
               type: 'interview_qa',
               interviewQA: batch.items,
               batchIndex: batch.batchIndex || i + 1,
-              credits_used: 0
+              credits_used: batch.creditsUsed ?? 0
             },
             userId
           );

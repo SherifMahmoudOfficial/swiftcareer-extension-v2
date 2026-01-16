@@ -33,6 +33,13 @@ interface JobAnalysisRequest {
   };
 }
 
+interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cached_tokens?: number;
+}
+
 interface JobAnalysisResponse {
   success: boolean;
   error?: string;
@@ -68,6 +75,11 @@ interface JobAnalysisResponse {
     };
     jobSkills: string[];
     isLinkedInUrl: boolean;
+    tokenUsage?: {
+      total: TokenUsage;
+      operations: Array<{ operation: string; usage: TokenUsage }>;
+    };
+    usedApify?: boolean;
   };
 }
 
@@ -78,7 +90,7 @@ function isLinkedInUrl(input: string): boolean {
 }
 
 // Extract skills from text using DeepSeek
-async function extractSkillsFromJobDescription(description: string): Promise<string[]> {
+async function extractSkillsFromJobDescription(description: string): Promise<{ skills: string[]; usage: TokenUsage }> {
   console.log('[Edge Function] 🤖 Calling DeepSeek API to extract skills (description length:', description.length, 'chars)');
   if (!DEEPSEEK_API_KEY) {
     console.error('[Edge Function] ❌ DeepSeek API key not configured');
@@ -124,8 +136,23 @@ async function extractSkillsFromJobDescription(description: string): Promise<str
   const content = data.choices[0].message.content;
   const parsed = JSON.parse(content);
   
-  console.log('[Edge Function] ✅ Skills extracted:', { count: parsed.skills?.length || 0, skills: parsed.skills });
-  return parsed.skills || [];
+  const usage: TokenUsage = {
+    prompt_tokens: data.usage?.prompt_tokens || 0,
+    completion_tokens: data.usage?.completion_tokens || 0,
+    total_tokens: data.usage?.total_tokens || 0,
+    cached_tokens: data.usage?.cached_tokens || 0
+  };
+  
+  console.log('[Edge Function] ✅ Skills extracted:', { 
+    count: parsed.skills?.length || 0, 
+    skills: parsed.skills,
+    tokenUsage: usage
+  });
+  
+  return { 
+    skills: parsed.skills || [],
+    usage: usage
+  };
 }
 
 // Calculate skill match using DeepSeek
@@ -140,6 +167,7 @@ async function calculateSkillMatch(
   suggestedSkills: string[];
   improvedSkills: Array<{ skill: string; suggestion: string }>;
   projectedMatchPercentage: number;
+  usage: TokenUsage;
 }> {
   console.log('[Edge Function] 🤖 Calling DeepSeek API to calculate skill match');
   if (!DEEPSEEK_API_KEY) {
@@ -221,6 +249,13 @@ Return the analysis as JSON.`;
   const content = data.choices[0].message.content;
   const parsed = JSON.parse(content);
 
+  const usage: TokenUsage = {
+    prompt_tokens: data.usage?.prompt_tokens || 0,
+    completion_tokens: data.usage?.completion_tokens || 0,
+    total_tokens: data.usage?.total_tokens || 0,
+    cached_tokens: data.usage?.cached_tokens || 0
+  };
+
   const result = {
     matchPercentage: Math.max(0, Math.min(100, parsed.matchPercentage || 0)),
     matchingSkills: parsed.matchingSkills || [],
@@ -228,6 +263,7 @@ Return the analysis as JSON.`;
     suggestedSkills: parsed.suggestedSkills || [],
     improvedSkills: parsed.improvedSkills || [],
     projectedMatchPercentage: Math.max(0, Math.min(100, parsed.projectedMatchPercentage || 0)),
+    usage: usage
   };
 
   console.log('[Edge Function] ✅ Skill match calculated:', {
@@ -235,7 +271,8 @@ Return the analysis as JSON.`;
     matchingSkillsCount: result.matchingSkills.length,
     suggestedSkillsCount: result.suggestedSkills.length,
     improvedSkillsCount: result.improvedSkills.length,
-    projectedMatchPercentage: result.projectedMatchPercentage
+    projectedMatchPercentage: result.projectedMatchPercentage,
+    tokenUsage: usage
   });
 
   return result;
@@ -331,7 +368,7 @@ async function scrapeLinkedInJob(jobUrl: string): Promise<any> {
 }
 
 // Parse job description text using DeepSeek
-async function parseJobDescription(jobDescription: string): Promise<any> {
+async function parseJobDescription(jobDescription: string): Promise<{ parsed: any; usage: TokenUsage }> {
   console.log('[Edge Function] 🤖 Calling DeepSeek API to parse job description (length:', jobDescription.length, 'chars)');
   if (!DEEPSEEK_API_KEY) {
     console.error('[Edge Function] ❌ DeepSeek API key not configured');
@@ -392,14 +429,22 @@ Return JSON with this structure:
   const content = data.choices[0].message.content;
   const parsed = JSON.parse(content);
   
+  const usage: TokenUsage = {
+    prompt_tokens: data.usage?.prompt_tokens || 0,
+    completion_tokens: data.usage?.completion_tokens || 0,
+    total_tokens: data.usage?.total_tokens || 0,
+    cached_tokens: data.usage?.cached_tokens || 0
+  };
+  
   console.log('[Edge Function] ✅ Job description parsed:', {
     hasTitle: !!parsed.title,
     hasCompany: !!parsed.company,
     hasLocation: !!parsed.location,
-    skillsCount: parsed.skills?.length || 0
+    skillsCount: parsed.skills?.length || 0,
+    tokenUsage: usage
   });
   
-  return parsed;
+  return { parsed, usage };
 }
 
 Deno.serve(async (req) => {
@@ -456,6 +501,8 @@ Deno.serve(async (req) => {
     console.log('[Edge Function] 🔗 Input type detection:', { isLinkedIn, inputPreview: jobInput.substring(0, 50) });
     let jobData: any;
     let jobSkills: string[] = [];
+    const tokenUsageOperations: Array<{ operation: string; usage: TokenUsage }> = [];
+    let usedApify = false;
 
     if (isLinkedIn) {
       // Scrape LinkedIn job
@@ -506,10 +553,14 @@ Deno.serve(async (req) => {
         skillsFromScraper: jobData.jobInfo.skills.length
       });
       
+      usedApify = true;
+      
       // Extract skills from description if not provided
       if (!jobData.jobInfo.skills || jobData.jobInfo.skills.length === 0) {
         console.log('[Edge Function] 🔍 No skills from scraper, extracting from description...');
-        jobSkills = await extractSkillsFromJobDescription(jobData.jobInfo.description);
+        const skillsResult = await extractSkillsFromJobDescription(jobData.jobInfo.description);
+        jobSkills = skillsResult.skills;
+        tokenUsageOperations.push({ operation: 'extract_skills', usage: skillsResult.usage });
         console.log('[Edge Function] ✅ Extracted skills from description:', { count: jobSkills.length, skills: jobSkills });
       } else {
         jobSkills = jobData.jobInfo.skills;
@@ -518,7 +569,9 @@ Deno.serve(async (req) => {
     } else {
       // Parse job description text
       console.log('[Edge Function] 📝 Parsing job description text (length:', jobInput.length, 'chars)');
-      const parsedJob = await parseJobDescription(jobInput);
+      const parseResult = await parseJobDescription(jobInput);
+      const parsedJob = parseResult.parsed;
+      tokenUsageOperations.push({ operation: 'parse_job', usage: parseResult.usage });
       
       console.log('[Edge Function] ✅ Job description parsed:', {
         hasTitle: !!parsedJob.title,
@@ -554,7 +607,9 @@ Deno.serve(async (req) => {
         console.log('[Edge Function] ✅ Using skills from parsed job:', { count: jobSkills.length });
       } else {
         console.log('[Edge Function] 🔍 No skills in parsed job, extracting from description...');
-        jobSkills = await extractSkillsFromJobDescription(jobInput);
+        const skillsResult = await extractSkillsFromJobDescription(jobInput);
+        jobSkills = skillsResult.skills;
+        tokenUsageOperations.push({ operation: 'extract_skills', usage: skillsResult.usage });
         console.log('[Edge Function] ✅ Extracted skills:', { count: jobSkills.length });
       }
     }
@@ -570,6 +625,7 @@ Deno.serve(async (req) => {
       jobSkills,
       jobData.jobInfo.description
     );
+    tokenUsageOperations.push({ operation: 'skill_match', usage: matchAnalysis.usage });
 
     console.log('[Edge Function] ✅ Skill match calculated:', {
       matchPercentage: matchAnalysis.matchPercentage,
@@ -578,14 +634,36 @@ Deno.serve(async (req) => {
       projectedMatchPercentage: matchAnalysis.projectedMatchPercentage
     });
 
-    // Build response
+    // Calculate total token usage
+    const totalUsage: TokenUsage = tokenUsageOperations.reduce((acc, op) => {
+      return {
+        prompt_tokens: acc.prompt_tokens + (op.usage.prompt_tokens || 0),
+        completion_tokens: acc.completion_tokens + (op.usage.completion_tokens || 0),
+        total_tokens: acc.total_tokens + (op.usage.total_tokens || 0),
+        cached_tokens: (acc.cached_tokens || 0) + (op.usage.cached_tokens || 0)
+      };
+    }, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cached_tokens: 0 });
+
+    // Build response - return tokenUsage only (no cost calculation on server)
     const response: JobAnalysisResponse = {
       success: true,
       data: {
         jobData,
-        matchAnalysis,
+        matchAnalysis: {
+          matchPercentage: matchAnalysis.matchPercentage,
+          matchingSkills: matchAnalysis.matchingSkills,
+          reasoning: matchAnalysis.reasoning,
+          suggestedSkills: matchAnalysis.suggestedSkills,
+          improvedSkills: matchAnalysis.improvedSkills,
+          projectedMatchPercentage: matchAnalysis.projectedMatchPercentage
+        },
         jobSkills,
         isLinkedInUrl: isLinkedIn,
+        tokenUsage: {
+          total: totalUsage,
+          operations: tokenUsageOperations
+        },
+        usedApify: usedApify
       },
     };
 

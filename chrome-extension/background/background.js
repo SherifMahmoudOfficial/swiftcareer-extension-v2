@@ -11,11 +11,18 @@ import {
   createOrUpdateChatThread,
   createJobAnalysisMessages,
   saveCVToDatabase,
-  createCVCoverLetterInterviewQAMessages
+  createCVCoverLetterInterviewQAMessages,
+  createPortfolioMessage
 } from '../utils/api.js';
 import { getCurrentUser, isAuthenticated, getAccessToken, getSupabaseClient } from '../utils/supabase.js';
 import { generateCoverLetter, generateInterviewQA, generateTailoredCV } from '../utils/generators.js';
 import { getCompleteCVData } from '../utils/cv_data.js';
+import { calculateCostFromUsage, calculateGeminiCostFromUsage } from '../utils/cost_calculator.js';
+import { deductCredits } from '../utils/credits_service.js';
+import { deepSeekJsonObject } from '../utils/deepseek_client.js';
+import { Storage } from '../utils/storage.js';
+import { generatePortfolioHTML } from '../utils/portfolio_generator.js';
+import { uploadPortfolioToStorage } from '../utils/portfolio_service.js';
 
 // Log service worker startup
 console.log('[Background] 🚀 Service Worker initialized successfully');
@@ -113,6 +120,16 @@ async function handleMessage(request, sender, sendResponse) {
           return;
         }
 
+        // Prefer real job text extracted from the DOM (Flutter-equivalent "job description"),
+        // and only fall back to URL if DOM extraction is missing/empty.
+        const domJobDescription = request.extractedJobData
+          ? buildJobDescriptionFromExtractedData(request.extractedJobData)
+          : '';
+        const jobInputForAnalysis =
+          domJobDescription && domJobDescription.trim().length > 0
+            ? domJobDescription
+            : request.jobUrl;
+
         // Get user profile and skills
         let userSkills = [];
         let userProfile = {};
@@ -129,7 +146,8 @@ async function handleMessage(request, sender, sendResponse) {
             location: profile.location,
             linkedin: profile.linkedin,
             phone: profile.phone,
-            website: profile.website
+            website: profile.website,
+            skills: userSkills
           };
           console.log('[Background] ✅ User profile fetched:', {
             fullName: userProfile.fullName,
@@ -148,8 +166,10 @@ async function handleMessage(request, sender, sendResponse) {
         let jobDescription;
 
         try {
-          // Try to use Apify first (send jobUrl)
-          console.log('[Background] 🌐 Calling job analysis API with URL:', request.jobUrl);
+          console.log('[Background] 🌐 Calling job analysis API with input:', {
+            kind: jobInputForAnalysis === request.jobUrl ? 'url' : 'dom_text',
+            length: jobInputForAnalysis.length
+          });
           console.log('[Background] 📤 API Request data:', {
             jobUrl: request.jobUrl,
             userId: request.userId,
@@ -158,7 +178,7 @@ async function handleMessage(request, sender, sendResponse) {
           });
           
           analysisResult = await callJobAnalysis(
-            request.jobUrl,
+            jobInputForAnalysis,
             request.userId,
             userSkills,
             userProfile
@@ -168,8 +188,20 @@ async function handleMessage(request, sender, sendResponse) {
             hasJobData: !!analysisResult.jobData,
             hasMatchAnalysis: !!analysisResult.matchAnalysis,
             jobSkillsCount: analysisResult.jobSkills?.length || 0,
-            isLinkedInUrl: analysisResult.isLinkedInUrl
+            isLinkedInUrl: analysisResult.isLinkedInUrl,
+            creditsUsed: analysisResult.creditsUsed
           });
+
+          // Notify popup to refresh credits if they were deducted
+          if (analysisResult.creditsUsed && analysisResult.creditsUsed > 0) {
+            try {
+              chrome.runtime.sendMessage({ action: 'creditsUpdated' }).catch(() => {
+                // Popup might not be open, ignore error
+              });
+            } catch (e) {
+              // Ignore if no listeners
+            }
+          }
 
           // Build job description for user message
           const jobInfo = analysisResult.jobData?.jobInfo || {};
@@ -370,7 +402,7 @@ async function getUserMessagePreferences(userId) {
       console.warn('[Background] ⚠️ No user data found, using defaults');
       // Return defaults if no data
       return {
-        preferences: { cv: true, cover_letter: true, interview_qa: true },
+        preferences: { cv: true, cover_letter: true, interview_qa: true, portfolio: true },
         hasSkills: false
       };
     }
@@ -379,12 +411,16 @@ async function getUserMessagePreferences(userId) {
     const defaultPreferences = {
       cv: true,
       cover_letter: true,
-      interview_qa: true
+      interview_qa: true,
+      portfolio: true
     };
 
-    const preferences = (data.message_preferences && typeof data.message_preferences === 'object') 
-      ? data.message_preferences 
-      : defaultPreferences;
+    const preferencesRaw =
+      (data.message_preferences && typeof data.message_preferences === 'object')
+        ? data.message_preferences
+        : {};
+    // Merge defaults so missing keys don't become undefined
+    const preferences = { ...defaultPreferences, ...preferencesRaw };
     const hasSkills = data.skills && Array.isArray(data.skills) && data.skills.length > 0;
 
     console.log('[Background] ✅ User preferences:', {
@@ -403,7 +439,7 @@ async function getUserMessagePreferences(userId) {
     });
     // Return defaults on error
     return {
-      preferences: { cv: true, cover_letter: true, interview_qa: true },
+      preferences: { cv: true, cover_letter: true, interview_qa: true, portfolio: true },
       hasSkills: false
     };
   }
@@ -436,6 +472,174 @@ function calculateMatchPercentage(userSkills, jobSkills) {
 }
 
 /**
+ * Flutter-equivalent strict skill match percentage (set intersection only).
+ * Used as fallback when AI matching fails.
+ */
+function calculateStrictSkillMatchPercentage(userSkills, jobSkills) {
+  if (!Array.isArray(jobSkills) || jobSkills.length === 0) return 0;
+  if (!Array.isArray(userSkills) || userSkills.length === 0) return 0;
+
+  const normalize = (s) => String(s || '').trim().toLowerCase();
+  const normalizedUser = new Set(userSkills.map(normalize).filter((s) => s.length > 0));
+  const normalizedJob = new Set(jobSkills.map(normalize).filter((s) => s.length > 0));
+  if (normalizedJob.size === 0) return 0;
+
+  let matches = 0;
+  for (const js of normalizedJob) {
+    if (normalizedUser.has(js)) matches += 1;
+  }
+  return Math.max(0, Math.min(100, Math.round((matches / normalizedJob.size) * 100)));
+}
+
+/**
+ * Flutter-equivalent simple keyword overlap fallback.
+ */
+function simpleKeywordOverlap(text1, text2) {
+  const t1 = String(text1 || '').trim();
+  const t2 = String(text2 || '').trim();
+  if (t1.length === 0 || t2.length === 0) return 0;
+
+  const words1 = new Set(
+    t1
+      .toLowerCase()
+      .split(/[^\w]+/)
+      .filter((w) => w.length > 3)
+  );
+  const words2 = new Set(
+    t2
+      .toLowerCase()
+      .split(/[^\w]+/)
+      .filter((w) => w.length > 3)
+  );
+  if (words2.size === 0) return 0;
+
+  let overlap = 0;
+  for (const w of words1) {
+    if (words2.has(w)) overlap += 1;
+  }
+  return Math.max(0, Math.min(100, Math.round((overlap / words2.size) * 100)));
+}
+
+/**
+ * Flutter-equivalent semantic similarity (0-100) using DeepSeek, with keyword-overlap fallback.
+ */
+async function calculateTextSimilarity({ text1, text2, context }) {
+  try {
+    const systemPrompt =
+      'You are a text similarity analyzer. Analyze how well two texts match and return a similarity score from 0-100. Output only valid JSON.';
+    const userPrompt =
+      `Text 1: ${text1}\n\n` +
+      `Text 2: ${text2}\n\n` +
+      `Context: ${context}\n\n` +
+      'Calculate semantic similarity (0-100) considering:\n' +
+      '- Keyword overlap\n' +
+      '- Semantic meaning\n' +
+      '- Relevance\n\n' +
+      'Return JSON: {"similarity": number}';
+
+    const result = await deepSeekJsonObject({
+      systemPrompt,
+      userPrompt,
+      temperature: 0.2,
+      label: 'Text Similarity'
+    });
+    const similarity = Math.round(Number(result?.parsed?.similarity ?? 0));
+    return Math.max(0, Math.min(100, similarity));
+  } catch (e) {
+    return simpleKeywordOverlap(text1, text2);
+  }
+}
+
+/**
+ * Flutter-equivalent AI skill match percentage (0-100) using DeepSeek, with strict-set fallback.
+ */
+async function calculateSkillMatchPercentageAI({ userSkills, jobSkills, jobDescription }) {
+  if (!Array.isArray(jobSkills) || jobSkills.length === 0) return 0;
+  if (!Array.isArray(userSkills) || userSkills.length === 0) return 0;
+
+  try {
+    const systemPrompt =
+      'You are a career matching expert. Compare user skills with job requirements intelligently, understanding:\n' +
+      '- Synonyms (e.g., "React" matches "React.js", "ReactJS")\n' +
+      '- Related skills (e.g., "JavaScript" partially matches "TypeScript")\n' +
+      '- Skill hierarchies (e.g., "Frontend Development" includes "React", "Vue")\n' +
+      '- Context from job description\n\n' +
+      'Return JSON: {\n' +
+      '  "matchPercentage": number (0-100),\n' +
+      '  "matchingSkills": ["skill1", "skill2", ...],\n' +
+      '  "reasoning": "brief explanation"\n' +
+      '}';
+
+    const descContext =
+      jobDescription && String(jobDescription).trim().length > 0
+        ? `\n\nJob Description Context:\n${jobDescription}`
+        : '';
+
+    const userPrompt =
+      `User Skills: ${userSkills.join(', ')}\n\n` +
+      `Job Required Skills: ${jobSkills.join(', ')}${descContext}\n\n` +
+      'Analyze the match and return JSON with matchPercentage, matchingSkills array, and reasoning.';
+
+    const result = await deepSeekJsonObject({
+      systemPrompt,
+      userPrompt,
+      temperature: 0.3,
+      label: 'Skill Match (Composite)'
+    });
+    const pct = Math.round(Number(result?.parsed?.matchPercentage ?? 0));
+    return Math.max(0, Math.min(100, pct));
+  } catch (e) {
+    return calculateStrictSkillMatchPercentage(userSkills, jobSkills);
+  }
+}
+
+/**
+ * Flutter-equivalent composite match:
+ * Skills (40%) + Summary similarity (30%) + Experiences similarity (30%)
+ */
+async function calculateCompositeMatch({ cvData, jobSkills, jobDescription }) {
+  const safeCv = cvData || {};
+  const userSkills = Array.isArray(safeCv.user?.skills) ? safeCv.user.skills : [];
+  const summary = String(safeCv.user?.summary ?? '');
+  const experiencesText = Array.isArray(safeCv.workExperiences)
+    ? safeCv.workExperiences
+        .map((e) => String(e?.description ?? ''))
+        .filter((d) => d.trim().length > 0)
+        .join(' ')
+    : '';
+
+  const jd = String(jobDescription ?? '');
+  const js = Array.isArray(jobSkills) ? jobSkills : [];
+
+  const skillsScore = await calculateSkillMatchPercentageAI({
+    userSkills,
+    jobSkills: js,
+    jobDescription: jd
+  });
+
+  let summaryScore = 0;
+  if (summary.trim().length > 0 && jd.trim().length > 0) {
+    summaryScore = await calculateTextSimilarity({
+      text1: summary,
+      text2: jd,
+      context: 'CV summary vs job description'
+    });
+  }
+
+  let experiencesScore = 0;
+  if (experiencesText.trim().length > 0 && jd.trim().length > 0) {
+    experiencesScore = await calculateTextSimilarity({
+      text1: experiencesText,
+      text2: jd,
+      context: 'CV experiences vs job description'
+    });
+  }
+
+  const composite = (skillsScore * 0.4) + (summaryScore * 0.3) + (experiencesScore * 0.3);
+  return Math.max(0, Math.min(100, Math.round(composite)));
+}
+
+/**
  * Generate CV, Cover Letter, and Interview QA after job analysis
  */
 async function generateContentAfterJobAnalysis(userId, chatThread, analysisResult, userProfile, userSkills) {
@@ -464,6 +668,7 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
     coverLetter: null,
     cv: null,
     interviewQA: null,
+    portfolio: null,
     messages: []
   };
 
@@ -471,8 +676,15 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
     // Generate Cover Letter if enabled
     if (preferences.cover_letter) {
       try {
+        console.log('[Background] 🔎 Validation (Cover Letter):', {
+          profileHasName: !!(userProfile?.fullName),
+          profileSkillsCount: Array.isArray(userProfile?.skills) ? userProfile.skills.length : 0,
+          jobTitle: jobData.title,
+          company: jobData.company,
+          jobDescriptionLength: (jobData.description || '').length
+        });
         console.log('[Background] 📝 Generating cover letter...');
-        const coverLetterContent = await generateCoverLetter({
+        const coverLetterResult = await generateCoverLetter({
           profile: userProfile,
           jobTitle: jobData.title,
           company: jobData.company,
@@ -481,12 +693,38 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
           instructions: null // Can be added if needed
         });
 
-        if (coverLetterContent && coverLetterContent.trim().length > 0) {
+        if (coverLetterResult.content && coverLetterResult.content.trim().length > 0) {
+          // Deduct credits for cover letter generation
+          let coverLetterCredits = 0;
+          try {
+            const coverLetterCost = calculateCostFromUsage(coverLetterResult.usage, 'Cover Letter');
+            coverLetterCredits = coverLetterCost.credits;
+            if (coverLetterCredits > 0) {
+              const deducted = await deductCredits({
+                credits: coverLetterCredits,
+                reason: 'Cover Letter',
+                userId: userId,
+                source: 'deepseek',
+                costDollars: coverLetterCost.totalCost
+              });
+              if (deducted) {
+                console.log('[Background] ✅ Credits deducted for cover letter:', coverLetterCredits);
+                // Notify popup to refresh credits
+                chrome.runtime.sendMessage({ action: 'creditsUpdated' }).catch(() => {});
+              } else {
+                console.error('[Background] ⚠️ Failed to deduct credits for cover letter');
+              }
+            }
+          } catch (creditError) {
+            console.error('[Background] ❌ Error deducting credits for cover letter:', creditError);
+          }
+          
           generatedContent.coverLetter = {
-            content: coverLetterContent,
-            instructions: null
+            content: coverLetterResult.content,
+            instructions: null,
+            creditsUsed: coverLetterCredits
           };
-          console.log('[Background] ✅ Cover letter generated (length:', coverLetterContent.length, 'chars)');
+          console.log('[Background] ✅ Cover letter generated (length:', coverLetterResult.content.length, 'chars, credits:', coverLetterCredits, ')');
         } else {
           console.warn('[Background] ⚠️ Cover letter generation returned empty content');
         }
@@ -503,6 +741,12 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
     // Generate CV if enabled and user has skills
     if (preferences.cv && userHasSkills) {
       try {
+        console.log('[Background] 🔎 Validation (Tailored CV):', {
+          jobTitle: jobData.title,
+          company: jobData.company,
+          jobSkillsCount: Array.isArray(jobData.skills) ? jobData.skills.length : 0,
+          jobDescriptionLength: (jobData.description || '').length
+        });
         console.log('[Background] 📄 Generating tailored CV...');
         
         // Get complete CV data
@@ -563,13 +807,40 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
           jobSkillsCount: jobData.skills.length
         });
         
-        const tailoredPatch = await generateTailoredCV({
+        const tailoredResult = await generateTailoredCV({
           cvData: cvData,
           jobData: jobData,
           jobSkills: jobData.skills,
           userInstructions: null,
           focusLabel: null
         });
+
+        const tailoredPatch = tailoredResult.patch;
+        
+        // Deduct credits for tailored CV generation
+        let cvCredits = 0;
+        try {
+          const cvCost = calculateCostFromUsage(tailoredResult.usage, 'Tailored CV');
+          cvCredits = cvCost.credits;
+          if (cvCredits > 0) {
+            const deducted = await deductCredits({
+              credits: cvCredits,
+              reason: 'Tailored CV',
+              userId: userId,
+              source: 'deepseek',
+              costDollars: cvCost.totalCost
+            });
+            if (deducted) {
+              console.log('[Background] ✅ Credits deducted for tailored CV:', cvCredits);
+              // Notify popup to refresh credits
+              chrome.runtime.sendMessage({ action: 'creditsUpdated' }).catch(() => {});
+            } else {
+              console.error('[Background] ⚠️ Failed to deduct credits for tailored CV');
+            }
+          }
+        } catch (creditError) {
+          console.error('[Background] ❌ Error deducting credits for tailored CV:', creditError);
+        }
 
         console.log('[Background] 📥 Received tailoredPatch from generateTailoredCV');
         console.log('[Background] 📥 tailoredPatch structure:', {
@@ -583,7 +854,8 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
           highlightsCount: tailoredPatch.highlights?.length || 0,
           highlights: tailoredPatch.highlights || [],
           experiencesCount: tailoredPatch.experiences?.length || 0,
-          experiences: tailoredPatch.experiences || []
+          experiences: tailoredPatch.experiences || [],
+          creditsUsed: cvCredits
         });
         console.log('[Background] 📥 Full tailoredPatch JSON:', JSON.stringify(tailoredPatch, null, 2));
 
@@ -662,7 +934,7 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
         if (Array.isArray(tailoredPatch.experiences) && tailoredPatch.experiences.length > 0) {
           finalExperiences = tailoredPatch.experiences.filter(exp => 
             exp && typeof exp === 'object' && 
-            typeof exp.index === 'number' &&
+            (typeof exp.index === 'number' || (typeof exp.index === 'string' && !Number.isNaN(parseInt(exp.index, 10)))) &&
             exp.description && typeof exp.description === 'string' && exp.description.trim().length > 0
           );
           console.log('[Background] ✅ Using tailoredPatch experiences (count:', finalExperiences.length, ')');
@@ -674,17 +946,59 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
           console.log('[Background] ⚠️ tailoredPatch experiences empty, using original experiences (count:', finalExperiences.length, ')');
         }
 
-        // Calculate match scores
-        const originalUserSkills = cvData.user?.skills || [];
-        const matchBefore = calculateMatchPercentage(originalUserSkills, jobData.skills);
-        const matchAfter = calculateMatchPercentage(finalSkills, jobData.skills);
-        
-        console.log('[Background] 📊 Calculated match scores:', {
+        // Build a Flutter-compatible tailored_report schema.
+        // Flutter expects: { matchBefore, matchAfter, changes, patch: { summary, skills, highlights, focusSummary, experienceDescriptionsByIndex } }
+        const experienceDescriptionsByIndex = {};
+        (finalExperiences || []).forEach((exp) => {
+          if (!exp) return;
+          const idx =
+            typeof exp.index === 'number'
+              ? exp.index
+              : (typeof exp.index === 'string' ? parseInt(exp.index, 10) : null);
+          const desc = (exp.description ?? '').toString();
+          if (idx === null || Number.isNaN(idx)) return;
+          if (desc.trim().length === 0) return;
+          experienceDescriptionsByIndex[String(idx)] = desc;
+        });
+
+        // Flutter-equivalent application: merge enhanced descriptions back onto the full work experience objects.
+        const tailoredWorkExperiences = (cvData.workExperiences || []).map((exp, idx) => {
+          const enhancedDescription = experienceDescriptionsByIndex[String(idx)];
+          if (enhancedDescription && enhancedDescription.trim().length > 0) {
+            return { ...exp, description: enhancedDescription };
+          }
+          return exp;
+        });
+
+        // Calculate match scores (Flutter-equivalent composite match)
+        const matchBefore = await calculateCompositeMatch({
+          cvData: {
+            user: {
+              skills: Array.isArray(cvData.user?.skills) ? cvData.user.skills : [],
+              summary: cvData.user?.summary ?? ''
+            },
+            workExperiences: Array.isArray(cvData.workExperiences) ? cvData.workExperiences : []
+          },
+          jobSkills: jobData.skills,
+          jobDescription: jobData.description
+        });
+
+        const matchAfter = await calculateCompositeMatch({
+          cvData: {
+            user: {
+              skills: Array.isArray(finalSkills) ? finalSkills : [],
+              summary: finalSummary
+            },
+            workExperiences: tailoredWorkExperiences
+          },
+          jobSkills: jobData.skills,
+          jobDescription: jobData.description
+        });
+
+        console.log('[Background] 📊 Calculated composite match scores:', {
           matchBefore,
           matchAfter,
-          originalSkillsCount: originalUserSkills.length,
-          tailoredSkillsCount: finalSkills.length,
-          jobSkillsCount: jobData.skills.length
+          jobSkillsCount: Array.isArray(jobData.skills) ? jobData.skills.length : 0
         });
         
         const cvDataWithReport = {
@@ -695,7 +1009,21 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
           experiences: finalExperiences,
           matchBefore: matchBefore,
           matchAfter: matchAfter,
-          changes: [] // Can be populated if needed
+          changes: [], // Can be populated if needed
+          creditsUsed: cvCredits
+        };
+
+        const tailoredReportForFlutter = {
+          matchBefore: matchBefore,
+          matchAfter: matchAfter,
+          changes: cvDataWithReport.changes || [],
+          patch: {
+            summary: cvDataWithReport.summary || '',
+            skills: cvDataWithReport.skills || [],
+            highlights: cvDataWithReport.highlights || [],
+            focusSummary: cvDataWithReport.focus_summary || null,
+            experienceDescriptionsByIndex
+          }
         };
 
         // Final validation: ensure critical fields are never empty
@@ -742,7 +1070,10 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
           cvDataWithReport.skills = ['Professional Skills'];
         }
         
-        generatedContent.cv = cvDataWithReport;
+        generatedContent.cv = {
+          ...cvDataWithReport,
+          workExperiences: tailoredWorkExperiences
+        };
         console.log('[Background] ✅ Tailored CV generated and stored in generatedContent.cv:', {
           hasSummary: !!cvDataWithReport.summary,
           summaryLength: cvDataWithReport.summary?.length || 0,
@@ -758,18 +1089,16 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
         // Save CV to database
         try {
           await saveCVToDatabase(
-            cvDataWithReport,
+            {
+              ...cvDataWithReport,
+              workExperiences: tailoredWorkExperiences
+            },
             userId,
             chatThread.id,
             null, // jobUrl - can be added if available
             jobData.title,
             jobData.company,
-            {
-              tailoredCvData: cvDataWithReport,
-              matchBefore: matchBefore,
-              matchAfter: matchAfter,
-              changes: []
-            }
+            tailoredReportForFlutter
           );
           console.log('[Background] ✅ CV saved to database');
         } catch (saveError) {
@@ -816,7 +1145,8 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
             })),
             matchBefore: fallbackMatchBefore,
             matchAfter: fallbackMatchAfter,
-            changes: []
+            changes: [],
+            creditsUsed: 0 // Fallback CV - no credits charged
           };
           
           generatedContent.cv = minimalCV;
@@ -837,10 +1167,16 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
     // Generate Interview QA if enabled and user has skills
     if (preferences.interview_qa && userHasSkills) {
       try {
+        console.log('[Background] 🔎 Validation (Interview QA):', {
+          profileSkillsCount: Array.isArray(userProfile?.skills) ? userProfile.skills.length : 0,
+          jobRequirementsCount: Array.isArray(jobData.skills) ? jobData.skills.length : 0,
+          jobDescriptionLength: (jobData.description || '').length,
+          experienceLevel: jobData.experienceLevel || ''
+        });
         console.log('[Background] ❓ Generating interview QA...');
         
         // Generate first batch (technical questions)
-        const interviewQABatch1 = await generateInterviewQA({
+        const interviewQAResult = await generateInterviewQA({
           profile: userProfile,
           jobTitle: jobData.title,
           company: jobData.company,
@@ -850,14 +1186,40 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
           batchIndex: 1
         });
 
-        if (interviewQABatch1 && interviewQABatch1.length > 0) {
+        if (interviewQAResult.items && interviewQAResult.items.length > 0) {
+          // Deduct credits for interview QA generation
+          let interviewQACredits = 0;
+          try {
+            const interviewQACost = calculateCostFromUsage(interviewQAResult.usage, 'Interview Q&A (batch 1)');
+            interviewQACredits = interviewQACost.credits;
+            if (interviewQACredits > 0) {
+              const deducted = await deductCredits({
+                credits: interviewQACredits,
+                reason: 'Interview Q&A (batch 1)',
+                userId: userId,
+                source: 'deepseek',
+                costDollars: interviewQACost.totalCost
+              });
+              if (deducted) {
+                console.log('[Background] ✅ Credits deducted for interview QA:', interviewQACredits);
+                // Notify popup to refresh credits
+                chrome.runtime.sendMessage({ action: 'creditsUpdated' }).catch(() => {});
+              } else {
+                console.error('[Background] ⚠️ Failed to deduct credits for interview QA');
+              }
+            }
+          } catch (creditError) {
+            console.error('[Background] ❌ Error deducting credits for interview QA:', creditError);
+          }
+          
           generatedContent.interviewQA = [
             {
               batchIndex: 1,
-              items: interviewQABatch1
+              items: interviewQAResult.items,
+              creditsUsed: interviewQACredits
             }
           ];
-          console.log('[Background] ✅ Interview QA generated (batch 1,', interviewQABatch1.length, 'questions)');
+          console.log('[Background] ✅ Interview QA generated (batch 1,', interviewQAResult.items.length, 'questions, credits:', interviewQACredits, ')');
         } else {
           console.warn('[Background] ⚠️ Interview QA generation returned empty results');
         }
@@ -911,6 +1273,171 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
       }
     } else {
       console.log('[Background] ℹ️ No content generated, skipping message creation');
+    }
+
+    // Generate Portfolio LAST (so the message appears at the end, like Flutter)
+    try {
+      const createPortfolioSetting = await Storage.get('createPortfolio');
+      const createPortfolioEnabled =
+        typeof createPortfolioSetting === 'boolean' ? createPortfolioSetting : true;
+
+      const portfolioPrefEnabled = !!preferences.portfolio;
+
+      if (!createPortfolioEnabled) {
+        console.log('[Background] ℹ️ Portfolio skipped - disabled in extension Settings (createPortfolio)');
+      } else if (!portfolioPrefEnabled) {
+        console.log('[Background] ℹ️ Portfolio skipped - disabled in user message_preferences.portfolio');
+      } else if (!userHasSkills) {
+        console.log('[Background] ℹ️ Portfolio skipped - user has no skills');
+      } else if (!chatThread || !chatThread.id) {
+        console.log('[Background] ⚠️ Portfolio skipped - no chat thread available');
+      } else {
+        // Avoid duplicates for the same thread
+        const client = await getSupabaseClient();
+        const existing = await client
+          .from('chat_messages')
+          .select('id')
+          .eq('thread_id', chatThread.id)
+          .eq('metadata->>type', 'portfolio')
+          .maybeSingle();
+        if (existing && existing.id) {
+          console.log('[Background] ℹ️ Portfolio already exists for this thread, skipping');
+        } else {
+          console.log('[Background] 🎨 Generating portfolio with Gemini...');
+
+          // Fetch full CV data for richer prompts (even if CV generation was skipped)
+          const cvData = await getCompleteCVData(userId);
+
+          const buildCvContent = (cv) => {
+            const u = cv?.user || {};
+            const buf = [];
+            buf.push(`Name: ${u.fullName || ''}`);
+            buf.push(`Email: ${u.email || ''}`);
+            buf.push(`Headline: ${u.headline || ''}`);
+            buf.push(`Summary: ${u.summary || ''}`);
+            buf.push(`Skills: ${(u.skills || []).join(', ')}`);
+            buf.push(`Location: ${u.location || ''}`);
+            buf.push(`LinkedIn: ${u.linkedin || ''}`);
+            buf.push(`Phone: ${u.phone || ''}`);
+            buf.push(`Website: ${u.website || ''}`);
+
+            if (Array.isArray(cv?.workExperiences) && cv.workExperiences.length > 0) {
+              buf.push('');
+              buf.push('Experience:');
+              for (const exp of cv.workExperiences) {
+                const pos = exp?.position || '';
+                const comp = exp?.company || '';
+                const desc = exp?.description || '';
+                buf.push(`- ${pos} at ${comp}`);
+                if (String(desc).trim().length > 0) buf.push(`  ${desc}`);
+              }
+            }
+            if (Array.isArray(cv?.educations) && cv.educations.length > 0) {
+              buf.push('');
+              buf.push('Education:');
+              for (const edu of cv.educations) {
+                buf.push(`- ${edu?.degree || ''} in ${edu?.field || 'N/A'} from ${edu?.institution || ''}`);
+              }
+            }
+            if (Array.isArray(cv?.projects) && cv.projects.length > 0) {
+              buf.push('');
+              buf.push('Projects:');
+              for (const p of cv.projects) {
+                buf.push(`- ${p?.name || ''}`);
+                if (p?.description) buf.push(`  ${p.description}`);
+              }
+            }
+            return buf.join('\n').trim();
+          };
+
+          const cvContent = buildCvContent(cvData) || '';
+
+          const jobInfo = analysisResult.jobData?.jobInfo || {};
+          const jobDescriptionText =
+            (jobInfo.description && String(jobInfo.description).trim().length > 0)
+              ? jobInfo.description
+              : '';
+          const jobDataForPortfolio = {
+            title: jobData.title,
+            company: jobData.company,
+            description: jobDescriptionText || jobData.description || ''
+          };
+
+          const requirements =
+            Array.isArray(analysisResult.jobSkills) && analysisResult.jobSkills.length > 0
+              ? analysisResult.jobSkills
+              : (Array.isArray(jobData.skills) ? jobData.skills : []);
+
+          const portfolioResult = await generatePortfolioHTML({
+            cvContent,
+            jobData: jobDataForPortfolio,
+            jobRequirements: requirements,
+            userProfile: userProfile,
+            cvData: cvData,
+            instructions: null
+          });
+
+          // Calculate & deduct credits (dynamic, based on actual usage)
+          let portfolioCredits = 0;
+          let portfolioCostDollars = 0;
+          try {
+            const cost = calculateGeminiCostFromUsage(portfolioResult.usage, 'Gemini Portfolio');
+            portfolioCredits = cost.credits;
+            portfolioCostDollars = cost.totalCost;
+            if (portfolioCredits > 0) {
+              const deducted = await deductCredits({
+                credits: portfolioCredits,
+                reason: 'Gemini Portfolio',
+                userId,
+                source: 'gemini',
+                costDollars: portfolioCostDollars
+              });
+              if (deducted) {
+                console.log('[Background] ✅ Credits deducted for portfolio:', portfolioCredits);
+                chrome.runtime.sendMessage({ action: 'creditsUpdated' }).catch(() => {});
+              } else {
+                console.error('[Background] ⚠️ Failed to deduct credits for portfolio');
+              }
+            }
+          } catch (creditError) {
+            console.error('[Background] ❌ Error deducting credits for portfolio:', creditError);
+          }
+
+          // Upload to Storage + create chat message
+          console.log('[Background] ☁️ Uploading portfolio to storage...');
+          const upload = await uploadPortfolioToStorage({
+            htmlContent: portfolioResult.html,
+            userId
+          });
+
+          const portfolioTitle = `Portfolio for ${jobData.title} at ${jobData.company}`.trim();
+          const portfolioMessage = await createPortfolioMessage(
+            chatThread.id,
+            upload.viewerUrl,
+            portfolioTitle,
+            portfolioCredits,
+            userId
+          );
+
+          generatedContent.portfolio = {
+            url: upload.viewerUrl,
+            title: portfolioTitle,
+            creditsUsed: portfolioCredits,
+            messageId: portfolioMessage?.id || null
+          };
+
+          if (portfolioMessage) {
+            generatedContent.messages = [...(generatedContent.messages || []), portfolioMessage];
+          }
+
+          console.log('[Background] ✅ Portfolio generated and message created:', {
+            url: upload.viewerUrl,
+            credits: portfolioCredits
+          });
+        }
+      }
+    } catch (portfolioOuterErr) {
+      console.error('[Background] ❌ Portfolio generation failed (non-fatal):', portfolioOuterErr);
     }
 
     return generatedContent;

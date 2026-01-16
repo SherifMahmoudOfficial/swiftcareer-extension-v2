@@ -3,26 +3,12 @@
  * Generates CV, Cover Letter, and Interview QA using DeepSeek API
  */
 
-import { Storage } from './storage.js';
-
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/chat/completions';
 const DEEPSEEK_MODEL = 'deepseek-chat';
 
-// Default DeepSeek API Key (hardcoded)
-const DEFAULT_DEEPSEEK_API_KEY = 'sk-80e102cca06342c48c385c5f0247a110';
-
-/**
- * Get DeepSeek API key from storage or use default
- */
-async function getDeepSeekApiKey() {
-  const apiKey = await Storage.get('DEEPSEEK_API_KEY');
-  if (apiKey) {
-    return apiKey;
-  }
-  // Use default key if not configured
-  console.log('[Generators] ℹ️ Using default DeepSeek API key');
-  return DEFAULT_DEEPSEEK_API_KEY;
-}
+// DeepSeek API Key (hardcoded)
+// NOTE: Intentionally not configurable via the Options page.
+const DEEPSEEK_API_KEY = 'sk-80e102cca06342c48c385c5f0247a110';
 
 /**
  * Call DeepSeek API
@@ -35,7 +21,7 @@ async function callDeepSeekAPI(messages, temperature = 0.45, responseFormat = nu
     timeout
   });
 
-  const apiKey = await getDeepSeekApiKey();
+  const apiKey = DEEPSEEK_API_KEY;
 
   const requestBody = {
     model: DEEPSEEK_MODEL,
@@ -72,12 +58,24 @@ async function callDeepSeekAPI(messages, temperature = 0.45, responseFormat = nu
     const data = await response.json();
     const content = data.choices[0].message.content;
     
+    // Extract usage information
+    const usage = {
+      prompt_tokens: data.usage?.prompt_tokens || 0,
+      completion_tokens: data.usage?.completion_tokens || 0,
+      total_tokens: data.usage?.total_tokens || 0,
+      cached_tokens: data.usage?.cached_tokens || 0 // DeepSeek may provide this
+    };
+    
     console.log('[Generators] ✅ DeepSeek API response received:', {
       contentLength: content.length,
-      hasContent: !!content
+      hasContent: !!content,
+      tokens: usage.total_tokens,
+      promptTokens: usage.prompt_tokens,
+      completionTokens: usage.completion_tokens,
+      cachedTokens: usage.cached_tokens
     });
 
-    return content;
+    return { content, usage };
   } catch (error) {
     clearTimeout(timeoutId);
     if (error.name === 'AbortError') {
@@ -96,7 +94,7 @@ async function callDeepSeekAPI(messages, temperature = 0.45, responseFormat = nu
  * @param {string} params.jobDescription - Job description
  * @param {string} params.jobUrl - Job URL (optional)
  * @param {string} params.instructions - User instructions (optional)
- * @returns {Promise<string>} Generated cover letter text
+ * @returns {Promise<{content: string, usage: Object}>} Generated cover letter text and token usage
  */
 export async function generateCoverLetter({
   profile,
@@ -151,7 +149,7 @@ ${userInstructions}
 Write the cover letter now.`;
 
   try {
-    const content = await callDeepSeekAPI(
+    const result = await callDeepSeekAPI(
       [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
@@ -161,13 +159,14 @@ Write the cover letter now.`;
       60000 // 60 seconds timeout
     );
 
-    const coverLetter = content.trim();
+    const coverLetter = result.content.trim();
     console.log('[Generators] ✅ Cover letter generated:', {
       length: coverLetter.length,
-      wordCount: coverLetter.split(/\s+/).length
+      wordCount: coverLetter.split(/\s+/).length,
+      tokens: result.usage.total_tokens
     });
 
-    return coverLetter;
+    return { content: coverLetter, usage: result.usage };
   } catch (error) {
     console.error('[Generators] ❌ Error generating cover letter:', error);
     // Return fallback stub content instead of throwing
@@ -175,7 +174,7 @@ Write the cover letter now.`;
       throw error; // Re-throw configuration errors
     }
     console.warn('[Generators] ⚠️ Returning fallback cover letter');
-    return `Dear Hiring Manager,
+    const fallbackContent = `Dear Hiring Manager,
 
 I am writing to express my interest in the ${jobTitle} position at ${company}. Based on the job description, I believe my skills and experience align well with your requirements.
 
@@ -183,6 +182,10 @@ I look forward to the opportunity to discuss how my background can contribute to
 
 Best regards,
 ${profile.fullName || 'Candidate'}`;
+    return { 
+      content: fallbackContent, 
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cached_tokens: 0 } 
+    };
   }
 }
 
@@ -196,7 +199,7 @@ ${profile.fullName || 'Candidate'}`;
  * @param {Array<string>} params.jobRequirements - Job skills/requirements
  * @param {string} params.experienceLevel - Experience level (optional)
  * @param {number} params.batchIndex - Batch index (1-5)
- * @returns {Promise<Array>} Array of {q, a} objects
+ * @returns {Promise<{items: Array, usage: Object}>} Array of {q, a} objects and token usage
  */
 export async function generateInterviewQA({
   profile,
@@ -246,7 +249,7 @@ ${jobRequirements && jobRequirements.length > 0 ? `Required Skills/Technologies:
 Generate 5 expected interview questions and concise answers. Return JSON with {"items":[{"q":"...","a":"..."}, ...]}.`;
 
   try {
-    const content = await callDeepSeekAPI(
+    const result = await callDeepSeekAPI(
       [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
@@ -256,7 +259,7 @@ Generate 5 expected interview questions and concise answers. Return JSON with {"
       45000 // 45 seconds timeout
     );
 
-    const parsed = JSON.parse(content);
+    const parsed = JSON.parse(result.content);
     const items = parsed.items || [];
 
     if (items.length !== 5) {
@@ -265,10 +268,11 @@ Generate 5 expected interview questions and concise answers. Return JSON with {"
 
     console.log('[Generators] ✅ Interview QA generated:', {
       batchIndex,
-      itemsCount: items.length
+      itemsCount: items.length,
+      tokens: result.usage.total_tokens
     });
 
-    return items;
+    return { items, usage: result.usage };
   } catch (error) {
     console.error('[Generators] ❌ Error generating interview QA:', error);
     // Return fallback stub content instead of throwing
@@ -276,13 +280,17 @@ Generate 5 expected interview questions and concise answers. Return JSON with {"
       throw error; // Re-throw configuration errors
     }
     console.warn('[Generators] ⚠️ Returning fallback interview QA');
-    return [
+    const fallbackItems = [
       { q: `Why are you interested in the ${jobTitle} position at ${company}?`, a: 'I am interested in this role because it aligns with my career goals and allows me to contribute my skills to your team.' },
       { q: 'What relevant experience do you have?', a: 'I have experience in the required skills and technologies mentioned in the job description.' },
       { q: 'How do you handle challenges?', a: 'I approach challenges systematically, breaking them down into manageable steps and seeking solutions collaboratively.' },
       { q: 'What are your strengths?', a: 'My strengths include problem-solving, attention to detail, and the ability to work effectively in a team environment.' },
       { q: 'Where do you see yourself in 5 years?', a: 'I see myself growing within the company, taking on more responsibilities, and contributing to the team\'s success.' }
     ];
+    return { 
+      items: fallbackItems, 
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cached_tokens: 0 } 
+    };
   }
 }
 
@@ -294,7 +302,7 @@ Generate 5 expected interview questions and concise answers. Return JSON with {"
  * @param {Array<string>} params.jobSkills - Job skills
  * @param {string} params.userInstructions - User instructions (optional)
  * @param {string} params.focusLabel - Focus keywords (optional)
- * @returns {Promise<Object>} Tailored CV data with report
+ * @returns {Promise<{patch: Object, usage: Object}>} Tailored CV data with report and token usage
  */
 export async function generateTailoredCV({
   cvData,
@@ -314,33 +322,8 @@ export async function generateTailoredCV({
     projectsCount: cvData.projects?.length || 0
   });
 
-  const systemPrompt = `You are a professional CV tailoring expert. Your PRIMARY GOAL is to MAXIMIZE the job match percentage by making AGGRESSIVE, SIGNIFICANT improvements.
-
-CRITICAL RULES:
-1. NEVER add information that is not present in the original CV data
-2. ONLY rephrase, prioritize, and select from existing information
-3. Use synonyms and keywords from the job description intelligently
-4. Focus on aspects most relevant to the job requirements
-
-Return ONLY valid JSON with this structure:
-{
-  "summary": "Rephrased professional summary (2-4 sentences)",
-  "focus_summary": "Short label (1-3 words) or null",
-  "skills": ["Prioritized", "list", "of", "skills"],
-  "highlights": [
-    {
-      "text": "Rephrased achievement 1",
-      "source": "experience|project",
-      "index": 0
-    }
-  ],
-  "experiences": [
-    {
-      "index": 0,
-      "description": "Enhanced description focusing on relevant aspects"
-    }
-  ]
-}`;
+  const systemPrompt =
+    'You are a professional CV tailoring expert. Your goal is to MAXIMIZE job match by making AGGRESSIVE improvements while strictly adhering to the original data. Output only valid JSON.';
 
   // Build comprehensive user prompt
   const userPrompt = buildCVTailoringPrompt(cvData, jobData, userInstructions, focusLabel);
@@ -350,7 +333,7 @@ Return ONLY valid JSON with this structure:
   console.log('[Generators] 📋 Prompt preview (first 500 chars):', userPrompt.substring(0, 500));
 
   try {
-    const content = await callDeepSeekAPI(
+    const result = await callDeepSeekAPI(
       [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
@@ -361,14 +344,15 @@ Return ONLY valid JSON with this structure:
     );
 
     console.log('[Generators] 📥 Received response from DeepSeek API');
-    console.log('[Generators] 📥 Response length:', content.length, 'characters');
-    console.log('[Generators] 📥 Response preview (first 500 chars):', content.substring(0, 500));
+    console.log('[Generators] 📥 Response length:', result.content.length, 'characters');
+    console.log('[Generators] 📥 Response preview (first 500 chars):', result.content.substring(0, 500));
+    console.log('[Generators] 📥 Token usage:', result.usage.total_tokens);
 
     // Parse JSON with detailed error handling
     let tailoredPatch;
     try {
       // Try to extract JSON if wrapped in markdown code blocks
-      let jsonContent = content.trim();
+      let jsonContent = result.content.trim();
       if (jsonContent.startsWith('```')) {
         const jsonMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
         if (jsonMatch && jsonMatch[1]) {
@@ -463,7 +447,14 @@ Return ONLY valid JSON with this structure:
     if (Array.isArray(tailoredPatch.experiences) && tailoredPatch.experiences.length > 0) {
       validatedExperiences = tailoredPatch.experiences.filter(exp => 
         exp && typeof exp === 'object' && 
-        typeof exp.index === 'number' &&
+        (() => {
+          const rawIndex = exp.index;
+          const idx =
+            typeof rawIndex === 'number'
+              ? rawIndex
+              : parseInt(String(rawIndex ?? ''), 10);
+          return !Number.isNaN(idx);
+        })() &&
         exp.description && typeof exp.description === 'string' && exp.description.trim().length > 0
       );
       console.log('[Generators] ✅ Using API experiences (count:', validatedExperiences.length, ')');
@@ -508,7 +499,7 @@ Return ONLY valid JSON with this structure:
     // Log full data structure for debugging
     console.log('[Generators] 📊 Full tailored patch structure:', JSON.stringify(validatedPatch, null, 2));
 
-    return validatedPatch;
+    return { patch: validatedPatch, usage: result.usage };
   } catch (error) {
     console.error('[Generators] ❌ Error generating tailored CV:', error);
     console.error('[Generators] ❌ Error details:', {
@@ -579,7 +570,10 @@ Return ONLY valid JSON with this structure:
       experiencesCount: fallbackData.experiences.length
     });
     
-    return fallbackData;
+    return { 
+      patch: fallbackData, 
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cached_tokens: 0 } 
+    };
   }
 }
 
@@ -587,157 +581,231 @@ Return ONLY valid JSON with this structure:
  * Build comprehensive CV tailoring prompt
  */
 function buildCVTailoringPrompt(cvData, jobData, userInstructions, focusLabel) {
-  let prompt = `Job Information:
-Title: ${jobData.title || ''}
-Company: ${jobData.company || ''}
-Location: ${jobData.location || ''}
-Experience Level: ${jobData.experienceLevel || ''}
-Employment Type: ${jobData.employmentType || ''}
+  const safeJob = jobData?.jobInfo ? jobData.jobInfo : (jobData || {});
+  const safeCompany = jobData?.companyInfo ? jobData.companyInfo : {};
 
-Job Description:
-${jobData.description || ''}
+  const jobTitle = safeJob.title ?? jobData?.title ?? '';
+  const jobLocation = safeJob.location ?? jobData?.location ?? '';
+  const experienceLevel = safeJob.experienceLevel ?? jobData?.experienceLevel ?? '';
+  const jobDescription = safeJob.description ?? jobData?.description ?? '';
+  const jobFunctionsRaw = safeJob.jobFunctions ?? jobData?.jobFunctions ?? [];
+  const industriesRaw = safeJob.industries ?? jobData?.industries ?? [];
+  const companyInfo = {
+    name: safeCompany.name ?? safeJob.company ?? jobData?.company ?? '',
+  };
 
-Required Skills: ${(jobData.skills || []).join(', ')}
+  const user = cvData?.user || {};
+  const experiences = Array.isArray(cvData?.workExperiences) ? cvData.workExperiences : [];
+  const projects = Array.isArray(cvData?.projects) ? cvData.projects : [];
 
-`;
+  const yearOrNA = (v) => {
+    if (!v) return 'N/A';
+    if (v instanceof Date && !Number.isNaN(v.getTime())) return String(v.getFullYear());
+    const d = new Date(String(v));
+    if (!Number.isNaN(d.getTime())) return String(d.getFullYear());
+    const s = String(v);
+    const m = s.match(/\b(19|20)\d{2}\b/);
+    return m ? m[0] : 'N/A';
+  };
 
-  if (userInstructions) {
-    prompt += `User Instructions:
-${userInstructions.substring(0, 800)}
+  const experiencesText = experiences
+    .map((exp, idx) => {
+      const startYear = yearOrNA(exp?.startDate);
+      const endYear = exp?.endDate ? yearOrNA(exp.endDate) : 'Present';
+      return (
+        `Experience ${idx}:\n` +
+        `  Position: ${exp?.position || 'N/A'}\n` +
+        `  Company: ${exp?.company || 'N/A'}\n` +
+        `  Dates: ${startYear}-${endYear}\n` +
+        `  Description: ${exp?.description ?? 'No description'}\n`
+      );
+    })
+    .join('\n');
 
-`;
+  const projectsText = projects
+    .map((proj, idx) => {
+      const techs = Array.isArray(proj?.technologies) ? proj.technologies.join(', ') : '';
+      return (
+        `Project ${idx}:\n` +
+        `  Name: ${proj?.name || 'N/A'}\n` +
+        `  Description: ${proj?.description ?? 'No description'}\n` +
+        `  Technologies: ${techs}\n`
+      );
+    })
+    .join('\n');
+
+  const skillsText = Array.isArray(user?.skills) ? user.skills.join(', ') : '';
+
+  // Flutter-style SOURCE OF TRUTH JSON
+  const cvJson = {
+    user: {
+      fullName: user?.fullName ?? '',
+      email: user?.email ?? '',
+      headline: user?.headline ?? '',
+      summary: user?.summary ?? '',
+      location: user?.location ?? '',
+      linkedin: user?.linkedin ?? '',
+      skills: Array.isArray(user?.skills) ? user.skills : [],
+    },
+    workExperiences: experiences.map((e) => ({
+      company: e?.company ?? '',
+      position: e?.position ?? '',
+      startDate: e?.startDate ?? '',
+      endDate: e?.endDate ?? '',
+      current: !!e?.current,
+      description: e?.description ?? '',
+    })),
+    projects: projects.map((p) => ({
+      name: p?.name ?? '',
+      description: p?.description ?? '',
+      technologies: Array.isArray(p?.technologies) ? p.technologies : [],
+    })),
+  };
+
+  const jobFunctions =
+    Array.isArray(jobFunctionsRaw) ? jobFunctionsRaw.join(', ') : String(jobFunctionsRaw ?? '');
+  const industries =
+    Array.isArray(industriesRaw) ? industriesRaw.join(', ') : String(industriesRaw ?? '');
+
+  const buffer = [];
+  buffer.push(
+    'You are a professional CV tailoring expert. Your PRIMARY GOAL is to MAXIMIZE the job match percentage by making AGGRESSIVE, SIGNIFICANT improvements.'
+  );
+  buffer.push('');
+  buffer.push('CRITICAL RULES:');
+  buffer.push('1. NEVER add information that is not present in the original CV data');
+  buffer.push('2. ONLY rephrase, prioritize, and select from existing information');
+  buffer.push('3. Use synonyms and keywords from the job description intelligently');
+  buffer.push('4. Focus on aspects most relevant to the job requirements');
+  buffer.push('');
+  buffer.push('AGGRESSIVE IMPROVEMENT STRATEGY:');
+  buffer.push(
+    '1. Summary: Completely rephrase to include 5-10 keywords/phrases from the job description. Use powerful action verbs (spearheaded, optimized, transformed, delivered).'
+  );
+  buffer.push(
+    '2. Skills: Reorder to prioritize job-matching skills FIRST. Extract skills from experience/project descriptions if they match job requirements (e.g., if job needs "Agile" and CV mentions "sprint planning", include "Agile" in skills).'
+  );
+  buffer.push(
+    '3. Experiences: Rephrase EVERY experience description to emphasize job-relevant achievements. Use metrics, impact statements, and job keywords throughout.'
+  );
+  buffer.push(
+    '4. Highlights: Select the 3-5 MOST relevant achievements that directly align with job requirements.'
+  );
+  buffer.push(
+    '5. Use synonyms intelligently: "led" → "spearheaded", "improved" → "optimized", "worked on" → "delivered", "helped" → "collaborated to achieve"'
+  );
+
+  if (focusLabel != null && String(focusLabel).trim().length > 0) {
+    const cleaned = String(focusLabel).trim();
+    buffer.push('');
+    buffer.push('FOCUS TAG (HIGHEST PRIORITY):');
+    buffer.push(`"${cleaned}"`);
+    buffer.push('');
+    buffer.push(
+      'CRITICAL: You MUST emphasize this focus throughout the CV (summary, skills ordering, highlights, and experience descriptions).'
+    );
+    buffer.push(
+      'This focus tag is a condensed user intent and should guide what you emphasize.'
+    );
+    buffer.push('');
   }
 
-  if (focusLabel) {
-    prompt += `Focus Keywords: ${focusLabel}
-
-`;
+  if (userInstructions != null && String(userInstructions).trim().length > 0) {
+    const instr = String(userInstructions);
+    buffer.push('');
+    buffer.push('USER CUSTOM INSTRUCTIONS (HIGH PRIORITY):');
+    buffer.push(`"${instr}"`);
+    buffer.push('');
+    buffer.push('CRITICAL: You MUST follow these instructions precisely:');
+    buffer.push(
+      '- If instruction says "اختصر" (summarize) or "باختصار" (briefly), make descriptions more concise and to the point'
+    );
+    buffer.push(
+      '- If instruction mentions focusing on something (e.g., "ركز على القيادة"), emphasize that aspect throughout the CV'
+    );
+    buffer.push(
+      '- If instruction says "اذكر" (mention) or "طالب" (student), ensure it\'s clearly included in the CV'
+    );
+    buffer.push(
+      '- If instruction asks to highlight specific skills or experiences, prioritize them in the summary and highlights'
+    );
+    buffer.push(
+      '- Apply these instructions throughout the CV tailoring process - summary, skills, experiences, and highlights'
+    );
+    buffer.push(
+      '- The user\'s custom instructions take precedence over general job matching when they conflict'
+    );
+    buffer.push('');
   }
 
-  prompt += `Candidate CV Data:
+  buffer.push('');
+  buffer.push('JOB INFORMATION:');
+  buffer.push(`Title: ${jobTitle}`);
+  buffer.push(`Company: ${companyInfo.name}`);
+  buffer.push(`Location: ${jobLocation}`);
+  buffer.push(`Experience Level: ${experienceLevel}`);
+  if (jobFunctions.trim().length > 0) buffer.push(`Job Functions: ${jobFunctions}`);
+  if (industries.trim().length > 0) buffer.push(`Industries: ${industries}`);
+  buffer.push('');
+  buffer.push('Job Description:');
+  buffer.push(jobDescription);
+  buffer.push('');
 
-User Profile:
-Name: ${cvData.user?.fullName || ''}
-Headline: ${cvData.user?.headline || ''}
-Summary: ${cvData.user?.summary || ''}
-Skills: ${(cvData.user?.skills || []).join(', ')}
-Location: ${cvData.user?.location || ''}
-Email: ${cvData.user?.email || ''}
-LinkedIn: ${cvData.user?.linkedin || ''}
+  buffer.push('USER CV DATA:');
+  buffer.push(`Full Name: ${user?.fullName ?? ''}`);
+  buffer.push(`Headline: ${user?.headline ?? 'N/A'}`);
+  buffer.push(`Summary: ${user?.summary ?? 'N/A'}`);
+  buffer.push(`Skills: ${skillsText}`);
+  buffer.push('');
+  buffer.push('Work Experiences:');
+  buffer.push(experiencesText);
+  buffer.push('');
+  buffer.push('Projects:');
+  buffer.push(projectsText);
+  buffer.push('');
 
-`;
+  buffer.push('USER_CV_JSON (SOURCE OF TRUTH):');
+  buffer.push(JSON.stringify(cvJson));
+  buffer.push('');
 
-  // Enhanced work experiences with more detail
-  if (cvData.workExperiences && cvData.workExperiences.length > 0) {
-    prompt += `Work Experiences (${cvData.workExperiences.length} positions):\n`;
-    cvData.workExperiences.forEach((exp, index) => {
-      prompt += `${index}. Position: ${exp.position || 'N/A'}\n`;
-      prompt += `   Company: ${exp.company || 'N/A'}\n`;
-      prompt += `   Period: ${exp.startDate || 'N/A'} - ${exp.endDate || exp.current ? 'Present' : 'N/A'}\n`;
-      prompt += `   Description: ${exp.description || 'No description provided'}\n`;
-      if (exp.description && exp.description.trim().length === 0) {
-        prompt += `   ⚠️ WARNING: This experience has no description. Use the position and company name to create relevant achievements.\n`;
-      }
-      prompt += `\n`;
-    });
-  } else {
-    prompt += `Work Experiences: None provided\n\n`;
-  }
+  buffer.push('TASK:');
+  buffer.push('Return a JSON object with the following structure:');
+  buffer.push('{');
+  buffer.push(
+    '  "summary": "Rephrased professional summary (2-4 sentences) focusing on job requirements and user instructions",'
+  );
+  buffer.push(
+    '  "focus_summary": "A very short (1-3 words) label summarizing the user instructions. If a FOCUS TAG was provided, return EXACTLY that tag (no prefixes). Return null if no user instructions/focus tag provided.",'
+  );
+  buffer.push(
+    '  "skills": ["Prioritized", "list", "of", "skills", "matching", "job", "requirements"],'
+  );
+  buffer.push('  "highlights": [');
+  buffer.push(
+    '    {"text": "Rephrased achievement 1", "source": "experience|project", "index": 0},'
+  );
+  buffer.push(
+    '    {"text": "Rephrased achievement 2", "source": "experience|project", "index": 1}'
+  );
+  buffer.push('  ],');
+  buffer.push('  "experiences": [');
+  buffer.push(
+    '    {"index": 0, "description": "Enhanced description focusing on relevant aspects"},'
+  );
+  buffer.push('    {"index": 1, "description": "Enhanced description..."}');
+  buffer.push('  ]');
+  buffer.push('}');
+  buffer.push('');
+  buffer.push('Guidelines:');
+  buffer.push('- Select 3-5 most relevant highlights from experiences and projects');
+  buffer.push('- Rephrase descriptions AGGRESSIVELY to use keywords from job description');
+  buffer.push('- Prioritize skills that match job requirements (reorder AND extract from descriptions)');
+  buffer.push('- Keep all factual information accurate (companies, dates, positions)');
+  buffer.push('- If user instructions provided, emphasize those aspects throughout');
+  buffer.push('- If a FOCUS TAG is provided, prioritize it and set focus_summary to exactly that tag (1-3 words, no prefixes)');
+  buffer.push('- Skills can be extracted from experience descriptions, project descriptions, or summary text if they match job requirements');
+  buffer.push('- Example: If job requires "Project Management" and CV mentions "managed cross-functional teams" in experience, include "Project Management" in skills');
+  buffer.push('- Make improvements SIGNIFICANT enough to increase match percentage by 10-20%');
 
-  // Enhanced projects with more detail
-  if (cvData.projects && cvData.projects.length > 0) {
-    prompt += `Projects (${cvData.projects.length} projects):\n`;
-    cvData.projects.forEach((project, index) => {
-      prompt += `${index}. Project Name: ${project.name || 'N/A'}\n`;
-      prompt += `   Description: ${project.description || 'No description provided'}\n`;
-      prompt += `   Technologies: ${(project.technologies || []).join(', ') || 'None specified'}\n`;
-      if (project.url) {
-        prompt += `   URL: ${project.url}\n`;
-      }
-      if (project.startDate || project.endDate) {
-        prompt += `   Period: ${project.startDate || 'N/A'} - ${project.endDate || 'N/A'}\n`;
-      }
-      prompt += `\n`;
-    });
-  } else {
-    prompt += `Projects: None provided\n\n`;
-  }
-
-  // Enhanced education
-  if (cvData.educations && cvData.educations.length > 0) {
-    prompt += `Education (${cvData.educations.length} entries):\n`;
-    cvData.educations.forEach((edu, index) => {
-      prompt += `${index}. Degree: ${edu.degree || 'N/A'}\n`;
-      prompt += `   Field: ${edu.field || 'N/A'}\n`;
-      prompt += `   Institution: ${edu.institution || 'N/A'}\n`;
-      if (edu.startDate || edu.endDate) {
-        prompt += `   Period: ${edu.startDate || 'N/A'} - ${edu.endDate || 'N/A'}\n`;
-      }
-      if (edu.gpa) {
-        prompt += `   GPA: ${edu.gpa}\n`;
-      }
-      prompt += `\n`;
-    });
-  }
-
-  // Add certifications if available
-  if (cvData.certifications && cvData.certifications.length > 0) {
-    prompt += `Certifications (${cvData.certifications.length} certifications):\n`;
-    cvData.certifications.forEach((cert, index) => {
-      prompt += `${index}. ${cert.name || 'N/A'} from ${cert.issuer || 'N/A'}\n`;
-      if (cert.issueDate) {
-        prompt += `   Issued: ${cert.issueDate}\n`;
-      }
-      prompt += `\n`;
-    });
-  }
-
-  // Add awards if available
-  if (cvData.awards && cvData.awards.length > 0) {
-    prompt += `Awards (${cvData.awards.length} awards):\n`;
-    cvData.awards.forEach((award, index) => {
-      prompt += `${index}. ${award.title || 'N/A'}\n`;
-      if (award.issuer) {
-        prompt += `   Issuer: ${award.issuer}\n`;
-      }
-      if (award.description) {
-        prompt += `   Description: ${award.description}\n`;
-      }
-      prompt += `\n`;
-    });
-  }
-
-  // Add example output structure to help AI understand
-  prompt += `\nIMPORTANT: You must return a JSON object with this EXACT structure:
-{
-  "summary": "A rephrased professional summary (2-4 sentences) that highlights the candidate's most relevant experience and skills for this specific job. MUST be non-empty.",
-  "focus_summary": "A short label (1-3 words) that captures the focus area, or null if not applicable",
-  "skills": ["Prioritized", "list", "of", "skills", "from", "the", "candidate's", "profile", "that", "match", "the", "job", "requirements"],
-  "highlights": [
-    {
-      "text": "A rephrased achievement or highlight from work experiences or projects that is relevant to the job",
-      "source": "experience",
-      "index": 0
-    }
-  ],
-  "experiences": [
-    {
-      "index": 0,
-      "description": "An enhanced description for this work experience focusing on aspects most relevant to the job"
-    }
-  ]
-}
-
-CRITICAL REQUIREMENTS:
-1. The "summary" field MUST be non-empty. If the original summary is empty, create one based on work experiences and skills.
-2. The "skills" array MUST contain at least some skills from the candidate's profile, prioritized by job relevance.
-3. The "highlights" array should contain 3-8 relevant achievements from work experiences or projects.
-4. The "experiences" array should have one entry per work experience, with enhanced descriptions.
-5. NEVER add information that is not present in the CV data above.
-6. Use synonyms and keywords from the job description intelligently.
-7. Focus on aspects most relevant to the job requirements.
-
-Now tailor this CV to maximize job match. Return ONLY the JSON object, no other text.`;
-
-  return prompt;
+  return buffer.join('\n');
 }

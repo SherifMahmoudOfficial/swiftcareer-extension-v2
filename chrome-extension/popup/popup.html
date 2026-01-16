@@ -8,57 +8,87 @@
 </head>
 <body>
   <div class="popup-container">
-    <div class="header">
-      <h1>SwiftCareer</h1>
-      <p class="subtitle">LinkedIn Job Analyzer</p>
-    </div>
-
     <!-- Auth Status -->
     <div id="authStatus" class="auth-status hidden">
       <div class="status-message">
         <span class="status-icon">✓</span>
         <span class="status-text">Signed in as <span id="userEmail"></span></span>
       </div>
+      
+      <!-- Credits Display -->
+      <div id="creditsDisplay" class="credits-display">
+        <div class="credits-info">
+          <span class="credits-label">Credits:</span>
+          <span id="creditsBalance" class="credits-balance">Loading...</span>
+        </div>
+        <div id="creditsWarning" class="credits-warning hidden">
+          <span class="warning-icon">⚠</span>
+          <span class="warning-text">Low credits! Please upgrade your plan.</span>
+        </div>
+      </div>
+      
       <button id="signOutBtn" class="btn btn-secondary">Sign Out</button>
     </div>
 
     <!-- Auth Form -->
     <div id="authForm" class="auth-form">
-      <div class="tabs">
-        <button class="tab active" data-tab="signin">Sign In</button>
-        <button class="tab" data-tab="signup">Sign Up</button>
+      <!-- Logo -->
+      <div class="logo-container">
+        <img src="../icons/logo.svg" alt="SwiftCareer" class="logo">
       </div>
 
-      <!-- Sign In Tab -->
-      <div id="signinTab" class="tab-content active">
-        <form id="signinForm">
-          <div class="form-group">
-            <label for="signinEmail">Email</label>
-            <input type="email" id="signinEmail" required autocomplete="email">
-          </div>
-          <div class="form-group">
-            <label for="signinPassword">Password</label>
-            <input type="password" id="signinPassword" required autocomplete="current-password">
-          </div>
-          <button type="submit" class="btn btn-primary">Sign In</button>
-        </form>
+      <!-- Welcome Text -->
+      <div class="welcome-section">
+        <h1 class="welcome-title">Welcome Back</h1>
+        <p class="welcome-subtitle">Sign in to continue to SwiftCareer</p>
       </div>
 
-      <!-- Sign Up Tab -->
-      <div id="signupTab" class="tab-content">
-        <form id="signupForm">
-          <div class="form-group">
-            <label for="signupEmail">Email</label>
-            <input type="email" id="signupEmail" required autocomplete="email">
-          </div>
-          <div class="form-group">
-            <label for="signupPassword">Password</label>
-            <input type="password" id="signupPassword" required autocomplete="new-password" minlength="6">
-            <small class="form-help">Minimum 6 characters</small>
-          </div>
-          <button type="submit" class="btn btn-primary">Sign Up</button>
-        </form>
-      </div>
+      <!-- Sign In Form -->
+      <form id="signinForm" class="signin-form">
+        <div class="form-group">
+          <input 
+            type="email" 
+            id="signinEmail" 
+            placeholder="Email Address" 
+            required 
+            autocomplete="email"
+            class="form-input"
+          >
+        </div>
+        <div class="form-group password-group">
+          <input 
+            type="password" 
+            id="signinPassword" 
+            placeholder="Password" 
+            required 
+            autocomplete="current-password"
+            class="form-input"
+          >
+          <button 
+            type="button" 
+            id="togglePassword" 
+            class="password-toggle"
+            aria-label="Toggle password visibility"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+          </button>
+        </div>
+        
+        <div class="forgot-password-container">
+          <a href="#" id="forgotPasswordLink" class="forgot-password-link">Forgot Password?</a>
+        </div>
+
+        <button type="submit" class="btn btn-primary signin-btn">
+          <span>Sign In</span>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+            <polyline points="12 5 19 12 12 19"></polyline>
+          </svg>
+        </button>
+      </form>
 
       <!-- Error Message -->
       <div id="errorMessage" class="error-message hidden"></div>

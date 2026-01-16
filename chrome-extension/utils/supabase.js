@@ -5,9 +5,11 @@
 
 import { Storage } from './storage.js';
 
-// Default Supabase configuration (hardcoded)
-const DEFAULT_SUPABASE_URL = 'https://xqztrdozodptapqlnyoj.supabase.co';
-const DEFAULT_SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhxenRyZG96b2RwdGFwcWxueW9qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ1MDg4OTUsImV4cCI6MjA4MDA4NDg5NX0.bEfbybiz-ncXoCK_DxvjKSLioFVVO3UoG4ztMMYf64o';
+// Supabase configuration (hardcoded)
+// NOTE: Intentionally not configurable via the Options page.
+const SUPABASE_URL = 'https://xqztrdozodptapqlnyoj.supabase.co';
+const SUPABASE_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhxenRyZG96b2RwdGFwcWxueW9qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ1MDg4OTUsImV4cCI6MjA4MDA4NDg5NX0.bEfbybiz-ncXoCK_DxvjKSLioFVVO3UoG4ztMMYf64o';
 
 let supabaseUrl = null;
 let supabaseAnonKey = null;
@@ -16,11 +18,9 @@ let supabaseAnonKey = null;
  * Initialize Supabase configuration
  */
 async function initConfig() {
-  // Try to get from storage first, fallback to defaults
-  const config = await Storage.getMultiple(['supabaseUrl', 'supabaseAnonKey']);
-  
-  supabaseUrl = (config.supabaseUrl || DEFAULT_SUPABASE_URL).replace(/\/$/, ''); // Remove trailing slash
-  supabaseAnonKey = config.supabaseAnonKey || DEFAULT_SUPABASE_ANON_KEY;
+  // Hardcoded only: no storage reads
+  supabaseUrl = SUPABASE_URL.replace(/\/$/, ''); // Remove trailing slash
+  supabaseAnonKey = SUPABASE_ANON_KEY;
 }
 
 /**

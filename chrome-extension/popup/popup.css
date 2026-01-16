@@ -1,5 +1,5 @@
 /**
- * Popup Styles
+ * Popup Styles - Dark Theme Matching Design
  */
 
 * {
@@ -9,42 +9,203 @@
 }
 
 body {
-  width: 350px;
-  min-height: 400px;
+  width: 400px;
+  min-height: 500px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background-color: #f3f2ef;
+  background-color: #0D1012;
+  color: #F4F4F4;
 }
 
 .popup-container {
   display: flex;
   flex-direction: column;
   height: 100%;
+  background-color: #0D1012;
 }
 
-/* Header */
-.header {
-  background: linear-gradient(135deg, #0A66C2 0%, #004182 100%);
-  color: white;
-  padding: 20px;
+/* Logo Container */
+.logo-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 32px 0 24px 0;
+}
+
+.logo {
+  height: 48px;
+  width: auto;
+}
+
+/* Welcome Section */
+.welcome-section {
   text-align: center;
+  margin-bottom: 32px;
+  padding: 0 24px;
 }
 
-.header h1 {
-  font-size: 24px;
+.welcome-title {
+  font-size: 28px;
   font-weight: 700;
-  margin-bottom: 4px;
+  color: #4589FF;
+  margin-bottom: 8px;
+  line-height: 1.2;
 }
 
-.subtitle {
-  font-size: 12px;
-  opacity: 0.9;
+.welcome-subtitle {
+  font-size: 16px;
+  color: #C1C7CD;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+/* Auth Form */
+.auth-form {
+  flex: 1;
+  padding: 0 24px 24px 24px;
+  display: flex;
+  flex-direction: column;
+}
+
+.signin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Form Groups */
+.form-group {
+  position: relative;
+  margin-bottom: 0;
+}
+
+.form-input {
+  width: 100%;
+  padding: 14px 16px;
+  background-color: #21272D;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  font-size: 14px;
+  color: #F4F4F4;
+  transition: all 0.2s;
+  font-family: inherit;
+}
+
+.form-input::placeholder {
+  color: #A8A8A8;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: #4589FF;
+  background-color: #21272D;
+}
+
+.form-input:hover {
+  background-color: #2A3036;
+}
+
+/* Password Group */
+.password-group {
+  position: relative;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #C1C7CD;
+  transition: color 0.2s;
+}
+
+.password-toggle:hover {
+  color: #F4F4F4;
+}
+
+.password-toggle:focus {
+  outline: none;
+}
+
+.password-toggle svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* Forgot Password Link */
+.forgot-password-container {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -8px;
+  margin-bottom: 8px;
+}
+
+.forgot-password-link {
+  color: #4589FF;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+  transition: color 0.2s;
+}
+
+.forgot-password-link:hover {
+  color: #5BA0FF;
+  text-decoration: underline;
+}
+
+/* Sign In Button */
+.signin-btn {
+  width: 100%;
+  padding: 16px 24px;
+  background-color: #4589FF;
+  color: #FFFFFF;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-family: inherit;
+}
+
+.signin-btn:hover:not(:disabled) {
+  background-color: #5BA0FF;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(69, 137, 255, 0.3);
+}
+
+.signin-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 2px 6px rgba(69, 137, 255, 0.2);
+}
+
+.signin-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.signin-btn svg {
+  width: 20px;
+  height: 20px;
+  stroke-width: 2.5;
 }
 
 /* Auth Status */
 .auth-status {
-  padding: 20px;
-  background: white;
-  border-bottom: 1px solid #e0e0e0;
+  padding: 24px;
+  background: #121619;
+  border-bottom: 1px solid #343A40;
 }
 
 .status-message {
@@ -53,9 +214,10 @@ body {
   gap: 8px;
   margin-bottom: 12px;
   padding: 12px;
-  background-color: #f0f9f4;
+  background-color: rgba(66, 190, 101, 0.1);
   border-radius: 8px;
-  color: #057642;
+  color: #42BE65;
+  border: 1px solid rgba(66, 190, 101, 0.2);
 }
 
 .status-icon {
@@ -71,85 +233,53 @@ body {
   font-weight: 600;
 }
 
-/* Auth Form */
-.auth-form {
-  flex: 1;
-  padding: 20px;
-  background: white;
-}
-
-/* Tabs */
-.tabs {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 20px;
-  border-bottom: 2px solid #e0e0e0;
-}
-
-.tab {
-  flex: 1;
+/* Credits Display */
+.credits-display {
+  margin-bottom: 12px;
   padding: 12px;
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
+  background-color: #21272D;
+  border-radius: 8px;
+  border: 1px solid #343A40;
+}
+
+.credits-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.credits-label {
   font-size: 14px;
-  font-weight: 600;
-  color: #666;
-  cursor: pointer;
-  transition: all 0.2s;
-  margin-bottom: -2px;
+  color: #C1C7CD;
+  font-weight: 500;
 }
 
-.tab:hover {
-  color: #0A66C2;
+.credits-balance {
+  font-size: 18px;
+  font-weight: 700;
+  color: #4589FF;
 }
 
-.tab.active {
-  color: #0A66C2;
-  border-bottom-color: #0A66C2;
-}
-
-.tab-content {
-  display: none;
-}
-
-.tab-content.active {
-  display: block;
-}
-
-/* Form */
-.form-group {
-  margin-bottom: 16px;
-}
-
-.form-group label {
-  display: block;
-  margin-bottom: 6px;
-  font-size: 14px;
-  font-weight: 600;
-  color: #333;
-}
-
-.form-group input {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid #ccc;
+.credits-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  background-color: rgba(241, 194, 27, 0.1);
   border-radius: 4px;
-  font-size: 14px;
-  transition: border-color 0.2s;
-}
-
-.form-group input:focus {
-  outline: none;
-  border-color: #0A66C2;
-  box-shadow: 0 0 0 3px rgba(10, 102, 194, 0.1);
-}
-
-.form-help {
-  display: block;
-  margin-top: 4px;
+  border: 1px solid rgba(241, 194, 27, 0.3);
   font-size: 12px;
-  color: #666;
+  color: #F1C21B;
+}
+
+.warning-icon {
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.warning-text {
+  flex: 1;
 }
 
 /* Buttons */
@@ -157,20 +287,21 @@ body {
   width: 100%;
   padding: 12px;
   border: none;
-  border-radius: 4px;
+  border-radius: 8px;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
+  font-family: inherit;
 }
 
 .btn-primary {
-  background-color: #0A66C2;
+  background-color: #4589FF;
   color: white;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background-color: #004182;
+  background-color: #5BA0FF;
 }
 
 .btn-primary:disabled {
@@ -179,34 +310,35 @@ body {
 }
 
 .btn-secondary {
-  background-color: #f3f2ef;
-  color: #333;
-  border: 1px solid #ccc;
+  background-color: #21272D;
+  color: #F4F4F4;
+  border: 1px solid #343A40;
 }
 
 .btn-secondary:hover {
-  background-color: #e0e0e0;
+  background-color: #2A3036;
+  border-color: #4589FF;
 }
 
 /* Messages */
 .error-message,
 .success-message {
   padding: 12px;
-  border-radius: 4px;
+  border-radius: 8px;
   margin-top: 16px;
   font-size: 14px;
 }
 
 .error-message {
-  background-color: #fee;
-  color: #c8102e;
-  border: 1px solid #ffcccc;
+  background-color: rgba(250, 77, 86, 0.1);
+  color: #FA4D56;
+  border: 1px solid rgba(250, 77, 86, 0.2);
 }
 
 .success-message {
-  background-color: #f0f9f4;
-  color: #057642;
-  border: 1px solid #cce5d4;
+  background-color: rgba(66, 190, 101, 0.1);
+  color: #42BE65;
+  border: 1px solid rgba(66, 190, 101, 0.2);
 }
 
 .hidden {
@@ -220,14 +352,14 @@ body {
   align-items: center;
   justify-content: center;
   padding: 40px 20px;
-  background: white;
+  background: #0D1012;
 }
 
 .spinner {
   width: 40px;
   height: 40px;
-  border: 4px solid #f3f2ef;
-  border-top-color: #0A66C2;
+  border: 4px solid #21272D;
+  border-top-color: #4589FF;
   border-radius: 50%;
   animation: spin 1s linear infinite;
   margin-bottom: 16px;
@@ -240,24 +372,25 @@ body {
 }
 
 .loading-state p {
-  color: #666;
+  color: #C1C7CD;
   font-size: 14px;
 }
 
 /* Footer */
 .footer {
-  padding: 12px 20px;
-  background: white;
-  border-top: 1px solid #e0e0e0;
+  padding: 12px 24px;
+  background: #121619;
+  border-top: 1px solid #343A40;
   text-align: center;
 }
 
 .footer a {
-  color: #0A66C2;
+  color: #4589FF;
   text-decoration: none;
   font-size: 12px;
 }
 
 .footer a:hover {
   text-decoration: underline;
+  color: #5BA0FF;
 }

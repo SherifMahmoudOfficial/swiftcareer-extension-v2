@@ -695,10 +695,10 @@ function updateButtonState(status, message = '') {
       icon.textContent = '✓';
       text.textContent = 'Sent successfully!';
       button.disabled = true;
-      // Reset after 3 seconds
+      // Change to alreadySent after 3 seconds
       setTimeout(() => {
         if (buttonState.status === 'success') {
-          updateButtonState('idle');
+          updateButtonState('alreadySent');
         }
       }, 3000);
       break;
@@ -740,6 +740,39 @@ function updateButtonState(status, message = '') {
       }
       text.textContent = 'Send to SwiftCareer';
       break;
+  }
+}
+
+/**
+ * Check if job already exists in database and update button state
+ */
+async function checkJobStatus() {
+  const jobId = extractJobId();
+  if (!jobId || !buttonState.element) {
+    return;
+  }
+  
+  try {
+    // Check authentication first
+    const authResponse = await chrome.runtime.sendMessage({ action: 'checkAuth' });
+    if (!authResponse.success || !authResponse.authenticated) {
+      return;
+    }
+    
+    const jobUrl = constructJobUrl(jobId);
+    const checkResponse = await chrome.runtime.sendMessage({
+      action: 'checkJobExists',
+      userId: authResponse.user.id,
+      jobUrl
+    });
+    
+    if (checkResponse.success && checkResponse.exists) {
+      console.log('[Content Script] ℹ️ Job already exists, updating button to alreadySent');
+      updateButtonState('alreadySent');
+    }
+  } catch (error) {
+    console.log('[Content Script] ⚠️ Error checking job status:', error);
+    // Don't update state on error, just log it
   }
 }
 
@@ -947,6 +980,9 @@ function injectButtonIntoContainer(container) {
     // Fallback: append to container
     container.appendChild(button);
   }
+  
+  // Check if job already exists and update button state
+  checkJobStatus();
 }
 
 /**
@@ -973,7 +1009,11 @@ function init() {
         status: 'idle'
       };
       // Re-inject after navigation
-      setTimeout(injectButton, 500);
+      setTimeout(() => {
+        injectButton();
+        // Check job status after injection
+        setTimeout(checkJobStatus, 1000);
+      }, 500);
     }
   }).observe(document, { subtree: true, childList: true });
   
