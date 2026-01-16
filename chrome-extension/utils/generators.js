@@ -405,16 +405,60 @@ export async function generateTailoredCV({
       validatedSummary = originalSummary.trim();
       console.log('[Generators] ⚠️ API summary empty, using original summary (length:', validatedSummary.length, ')');
     } else {
-      // Last resort: create a basic summary from available data
-      const skillsText = originalSkills.length > 0 ? originalSkills.slice(0, 5).join(', ') : 'various skills';
-      const expText = originalExperiences.length > 0 ? `${originalExperiences.length} years of experience` : 'professional experience';
-      validatedSummary = `Experienced professional with ${expText} in ${skillsText}.`;
-      console.log('[Generators] ⚠️ No summary available, created fallback summary');
+      // Last resort: create a basic summary WITHOUT fabricating years/metrics.
+      const skillsText =
+        originalSkills.length > 0 ? originalSkills.slice(0, 5).join(', ') : 'relevant skills';
+      const rolesText =
+        originalExperiences.length > 0 ? `${originalExperiences.length} role(s)` : 'professional roles';
+      validatedSummary = `Professional with experience across ${rolesText} and skills in ${skillsText}.`;
+      console.log('[Generators] ⚠️ No summary available, created non-fabricated fallback summary');
     }
+
+    const normalize = (s) =>
+      String(s ?? '')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    // Build a conservative allow-list for skills so we never "invent" skills.
+    const allowedSkills = new Set(
+      (originalSkills || [])
+        .map((s) => normalize(s))
+        .filter((s) => s.length > 0)
+    );
+    const originalTextBlob = [
+      originalSummary,
+      ...(Array.isArray(originalExperiences) ? originalExperiences.map((e) => e?.description || '') : []),
+      ...(Array.isArray(cvData?.projects) ? cvData.projects.map((p) => p?.description || '') : [])
+    ]
+      .join('\n')
+      .toLowerCase();
+    // Also allow project technologies explicitly.
+    (Array.isArray(cvData?.projects) ? cvData.projects : []).forEach((p) => {
+      (Array.isArray(p?.technologies) ? p.technologies : []).forEach((t) => {
+        const n = normalize(t);
+        if (n.length > 0) allowedSkills.add(n);
+      });
+    });
 
     let validatedSkills = [];
     if (Array.isArray(tailoredPatch.skills) && tailoredPatch.skills.length > 0) {
-      validatedSkills = tailoredPatch.skills.filter(s => s && typeof s === 'string' && s.trim().length > 0);
+      const originalCount = tailoredPatch.skills.length;
+      validatedSkills = tailoredPatch.skills
+        .filter((s) => s && typeof s === 'string' && s.trim().length > 0)
+        .filter((s) => {
+          const n = normalize(s);
+          if (!n) return false;
+          if (allowedSkills.has(n)) return true;
+          // If the term already exists verbatim in the user's original text, it's not invented.
+          return originalTextBlob.includes(n);
+        });
+      if (validatedSkills.length < originalCount) {
+        console.warn(
+          '[Generators] ⚠️ Dropped skills not found in source CV data:',
+          originalCount - validatedSkills.length
+        );
+      }
       console.log('[Generators] ✅ Using API skills (count:', validatedSkills.length, ')');
     }
     if (validatedSkills.length === 0 && originalSkills.length > 0) {
@@ -443,29 +487,53 @@ export async function generateTailoredCV({
       console.log('[Generators] ⚠️ API highlights empty, created from experiences (count:', validatedHighlights.length, ')');
     }
 
-    let validatedExperiences = [];
+    // Experiences: ensure we always return one item per original experience index.
+    const originalExperiencesCount = Array.isArray(originalExperiences) ? originalExperiences.length : 0;
+    const experiencesByIndex = {};
     if (Array.isArray(tailoredPatch.experiences) && tailoredPatch.experiences.length > 0) {
-      validatedExperiences = tailoredPatch.experiences.filter(exp => 
-        exp && typeof exp === 'object' && 
-        (() => {
-          const rawIndex = exp.index;
-          const idx =
-            typeof rawIndex === 'number'
-              ? rawIndex
-              : parseInt(String(rawIndex ?? ''), 10);
-          return !Number.isNaN(idx);
-        })() &&
-        exp.description && typeof exp.description === 'string' && exp.description.trim().length > 0
-      );
-      console.log('[Generators] ✅ Using API experiences (count:', validatedExperiences.length, ')');
+      tailoredPatch.experiences.forEach((exp) => {
+        if (!exp || typeof exp !== 'object') return;
+        const rawIndex = exp.index;
+        const idx =
+          typeof rawIndex === 'number'
+            ? rawIndex
+            : parseInt(String(rawIndex ?? ''), 10);
+        const desc = typeof exp.description === 'string' ? exp.description.trim() : '';
+        if (Number.isNaN(idx) || idx === null) return;
+        if (!desc) return;
+        experiencesByIndex[String(idx)] = desc;
+      });
     }
-    // If experiences are empty but we have original experiences, use them
-    if (validatedExperiences.length === 0 && originalExperiences.length > 0) {
-      validatedExperiences = originalExperiences.map((exp, idx) => ({
-        index: idx,
-        description: exp.description || `${exp.position || 'Position'} at ${exp.company || 'Company'}`
+
+    const missingExperienceIndices = [];
+    for (let i = 0; i < originalExperiencesCount; i++) {
+      if (!experiencesByIndex[String(i)]) missingExperienceIndices.push(i);
+    }
+
+    let usedExperienceFallback = false;
+    if (originalExperiencesCount > 0 && missingExperienceIndices.length > 0) {
+      usedExperienceFallback = true;
+      console.warn('[Generators] ⚠️ Tailored experiences missing indices, will fallback for now:', missingExperienceIndices);
+      // Temporary fallback values for missing ones (original description).
+      missingExperienceIndices.forEach((i) => {
+        const exp = originalExperiences[i] || {};
+        const d = (exp.description || '').toString().trim();
+        experiencesByIndex[String(i)] = d.length > 0 ? d : `${exp.position || 'Position'} at ${exp.company || 'Company'}`;
+      });
+    }
+
+    let validatedExperiences = [];
+    if (originalExperiencesCount > 0) {
+      validatedExperiences = Array.from({ length: originalExperiencesCount }, (_, i) => ({
+        index: i,
+        description: experiencesByIndex[String(i)] || ''
       }));
-      console.log('[Generators] ⚠️ API experiences empty, using original experiences (count:', validatedExperiences.length, ')');
+    } else {
+      validatedExperiences = [];
+    }
+
+    if (Array.isArray(validatedExperiences) && validatedExperiences.length > 0) {
+      console.log('[Generators] ✅ Built experiences array (count:', validatedExperiences.length, ')');
     }
 
     const validatedPatch = {
@@ -475,6 +543,99 @@ export async function generateTailoredCV({
       highlights: validatedHighlights,
       experiences: validatedExperiences
     };
+
+    // If the API didn't return full experiences, do a targeted retry (experiences-only) before returning.
+    if (usedExperienceFallback && originalExperiencesCount > 0) {
+      console.log('[Generators] 🔁 Retrying CV tailoring for experiences only (to avoid leaving descriptions unchanged)...');
+
+      const safeJob = jobData?.jobInfo ? jobData.jobInfo : (jobData || {});
+      const retryPromptParts = [];
+      retryPromptParts.push('You MUST output ONLY valid JSON.');
+      retryPromptParts.push('CRITICAL HONESTY RULES:');
+      retryPromptParts.push('- Do NOT add any new facts, years, metrics, tools, or responsibilities not in the original descriptions.');
+      retryPromptParts.push('- Only rephrase the wording to better match the job description keywords.');
+      retryPromptParts.push('');
+      retryPromptParts.push('JOB DESCRIPTION:');
+      retryPromptParts.push(String(safeJob.description ?? jobData?.description ?? ''));
+      retryPromptParts.push('');
+      retryPromptParts.push('USER_CV_JSON (SOURCE OF TRUTH):');
+      retryPromptParts.push(JSON.stringify({
+        workExperiences: (Array.isArray(originalExperiences) ? originalExperiences : []).map((e) => ({
+          company: e?.company ?? '',
+          position: e?.position ?? '',
+          startDate: e?.startDate ?? '',
+          endDate: e?.endDate ?? '',
+          current: !!e?.current,
+          description: e?.description ?? ''
+        }))
+      }));
+      retryPromptParts.push('');
+      retryPromptParts.push('TASK: Return exactly this JSON shape:');
+      retryPromptParts.push('{"experiences":[{"index":0,"description":"..."}]}');
+      retryPromptParts.push('You MUST include an item for EVERY index from 0 to ' + (originalExperiencesCount - 1) + '.');
+
+      try {
+        const retryResult = await callDeepSeekAPI(
+          [
+            {
+              role: 'system',
+              content:
+                'You are a CV tailoring expert. Strictly adhere to source data. Output only valid JSON.'
+            },
+            { role: 'user', content: retryPromptParts.join('\n') }
+          ],
+          0.2,
+          { type: 'json_object' },
+          60000
+        );
+
+        let retryJson = null;
+        try {
+          let jsonContent = retryResult.content.trim();
+          if (jsonContent.startsWith('```')) {
+            const jsonMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+            if (jsonMatch && jsonMatch[1]) jsonContent = jsonMatch[1].trim();
+          }
+          retryJson = JSON.parse(jsonContent);
+        } catch (e) {
+          retryJson = null;
+        }
+
+        if (retryJson && Array.isArray(retryJson.experiences)) {
+          const retryByIndex = {};
+          retryJson.experiences.forEach((exp) => {
+            if (!exp || typeof exp !== 'object') return;
+            const idx =
+              typeof exp.index === 'number'
+                ? exp.index
+                : parseInt(String(exp.index ?? ''), 10);
+            const desc = typeof exp.description === 'string' ? exp.description.trim() : '';
+            if (Number.isNaN(idx) || idx === null) return;
+            if (!desc) return;
+            retryByIndex[String(idx)] = desc;
+          });
+
+          const stillMissing = [];
+          for (let i = 0; i < originalExperiencesCount; i++) {
+            if (!retryByIndex[String(i)]) stillMissing.push(i);
+          }
+
+          if (stillMissing.length === 0) {
+            validatedPatch.experiences = Array.from({ length: originalExperiencesCount }, (_, i) => ({
+              index: i,
+              description: retryByIndex[String(i)]
+            }));
+            console.log('[Generators] ✅ Experiences-only retry succeeded; all descriptions rephrased.');
+          } else {
+            console.warn('[Generators] ⚠️ Experiences-only retry still missing indices:', stillMissing);
+          }
+        } else {
+          console.warn('[Generators] ⚠️ Experiences-only retry returned invalid shape; keeping fallback experiences.');
+        }
+      } catch (retryError) {
+        console.warn('[Generators] ⚠️ Experiences-only retry failed; keeping fallback experiences:', retryError?.message || retryError);
+      }
+    }
 
     // Final validation: ensure we never return completely empty data
     if (!validatedPatch.summary || validatedPatch.summary.trim().length === 0) {
@@ -523,10 +684,13 @@ export async function generateTailoredCV({
     // Ensure summary is never empty
     let fallbackSummary = originalSummary;
     if (!fallbackSummary || fallbackSummary.trim().length === 0) {
-      const skillsText = originalSkills.length > 0 ? originalSkills.slice(0, 5).join(', ') : 'various skills';
-      const expText = originalExperiences.length > 0 ? `${originalExperiences.length} years of experience` : 'professional experience';
-      fallbackSummary = `Experienced professional with ${expText} in ${skillsText}.`;
-      console.log('[Generators] ⚠️ Created fallback summary from available data');
+      // Never fabricate years/metrics in fallback copy.
+      const skillsText =
+        originalSkills.length > 0 ? originalSkills.slice(0, 5).join(', ') : 'relevant skills';
+      const rolesText =
+        originalExperiences.length > 0 ? `${originalExperiences.length} role(s)` : 'professional roles';
+      fallbackSummary = `Professional with experience across ${rolesText} and skills in ${skillsText}.`;
+      console.log('[Generators] ⚠️ Created non-fabricated fallback summary from available data');
     }
     
     // Ensure skills is never empty
@@ -677,6 +841,11 @@ function buildCVTailoringPrompt(cvData, jobData, userInstructions, focusLabel) {
   buffer.push('2. ONLY rephrase, prioritize, and select from existing information');
   buffer.push('3. Use synonyms and keywords from the job description intelligently');
   buffer.push('4. Focus on aspects most relevant to the job requirements');
+  buffer.push('5. ABSOLUTE HONESTY: Do NOT fabricate years of experience, numbers/metrics, tools, responsibilities, or achievements');
+  buffer.push('6. Metrics rule: You may ONLY mention a metric/number if it already exists verbatim in USER_CV_JSON');
+  buffer.push(
+    '7. Skills rule: Do NOT invent new skills. You may ONLY use/reorder skills that already exist in USER_CV_JSON (user.skills, project technologies, or terms already present in descriptions).'
+  );
   buffer.push('');
   buffer.push('AGGRESSIVE IMPROVEMENT STRATEGY:');
   buffer.push(
@@ -686,7 +855,7 @@ function buildCVTailoringPrompt(cvData, jobData, userInstructions, focusLabel) {
     '2. Skills: Reorder to prioritize job-matching skills FIRST. Extract skills from experience/project descriptions if they match job requirements (e.g., if job needs "Agile" and CV mentions "sprint planning", include "Agile" in skills).'
   );
   buffer.push(
-    '3. Experiences: Rephrase EVERY experience description to emphasize job-relevant achievements. Use metrics, impact statements, and job keywords throughout.'
+    '3. Experiences: Rephrase EVERY experience description to emphasize job-relevant aspects. Use impact statements and job keywords. ONLY include metrics if they already exist in the original description.'
   );
   buffer.push(
     '4. Highlights: Select the 3-5 MOST relevant achievements that directly align with job requirements.'
@@ -694,6 +863,12 @@ function buildCVTailoringPrompt(cvData, jobData, userInstructions, focusLabel) {
   buffer.push(
     '5. Use synonyms intelligently: "led" → "spearheaded", "improved" → "optimized", "worked on" → "delivered", "helped" → "collaborated to achieve"'
   );
+  buffer.push('');
+  buffer.push('EXPERIENCE DESCRIPTIONS - CRITICAL:');
+  buffer.push('- You MUST return an "experiences" array with a rephrased description for EVERY work experience (one per index)');
+  buffer.push('- NEVER fabricate or add responsibilities/achievements that are not present in the original description');
+  buffer.push('- Keep companies/roles/dates the same; ONLY rewrite the wording to better match the job');
+  buffer.push('- Output item format: {"index": N, "description": "rephrased description"}');
 
   if (focusLabel != null && String(focusLabel).trim().length > 0) {
     const cleaned = String(focusLabel).trim();

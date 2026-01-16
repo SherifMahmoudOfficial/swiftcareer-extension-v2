@@ -7,7 +7,7 @@ import { Storage } from './storage.js';
 
 // Supabase configuration (hardcoded)
 // NOTE: Intentionally not configurable via the Options page.
-const SUPABASE_URL = 'https://xqztrdozodptapqlnyoj.supabase.co';
+const SUPABASE_URL = 'https://api.swiftcareer.io';
 const SUPABASE_ANON_KEY =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhxenRyZG96b2RwdGFwcWxueW9qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ1MDg4OTUsImV4cCI6MjA4MDA4NDg5NX0.bEfbybiz-ncXoCK_DxvjKSLioFVVO3UoG4ztMMYf64o';
 

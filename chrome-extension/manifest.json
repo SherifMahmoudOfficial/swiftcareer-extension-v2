@@ -11,6 +11,7 @@
   "host_permissions": [
     "https://*.linkedin.com/*",
     "https://*.supabase.co/*",
+    "https://api.swiftcareer.io/*",
     "https://api.deepseek.com/*",
     "https://generativelanguage.googleapis.com/*"
   ],
