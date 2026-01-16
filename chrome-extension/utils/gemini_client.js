@@ -50,6 +50,8 @@ export async function callGeminiAPI({
   temperature = 1.0,
   label = null
 }) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
   const requestBody = {
     systemInstruction: { parts: [{ text: String(systemPrompt || '') }] },
     contents: [
@@ -73,19 +75,45 @@ export async function callGeminiAPI({
     });
   }
 
-  const res = await fetch(`${GEMINI_BASE_URL}?key=${GEMINI_API_KEY}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(requestBody)
-  });
+  const maxAttempts = 4;
+  let lastErr = null;
+  let data = null;
+  let text = '';
 
-  const text = await res.text();
-  if (!res.ok) {
-    const msg = extractGeminiErrorMessage(text);
-    throw new Error(`Gemini API error ${res.status}: ${msg}`);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = await fetch(`${GEMINI_BASE_URL}?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody)
+    });
+
+    text = await res.text();
+    if (!res.ok) {
+      const msg = extractGeminiErrorMessage(text);
+      const err = new Error(`Gemini API error ${res.status}: ${msg}`);
+      lastErr = err;
+
+      // Retry on rate limiting / transient backend issues.
+      if (res.status === 429 || res.status === 503) {
+        const backoffMs = Math.round(1200 * Math.pow(2, attempt - 1) + Math.random() * 400);
+        console.warn(`[Gemini] ${label || 'call'} - Retryable error (${res.status}) attempt ${attempt}/${maxAttempts}. Backing off ${backoffMs}ms.`);
+        if (attempt < maxAttempts) {
+          await sleep(backoffMs);
+          continue;
+        }
+      }
+
+      throw err;
+    }
+
+    data = JSON.parse(text);
+    break;
   }
 
-  const data = JSON.parse(text);
+  if (!data) {
+    throw lastErr || new Error('Gemini API error: no response data');
+  }
+
   const content = extractCandidateText(data).trim();
   if (!content) throw new Error('Empty response from Gemini API');
 

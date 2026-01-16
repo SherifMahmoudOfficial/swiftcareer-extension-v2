@@ -1545,10 +1545,16 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
           .eq('thread_id', chatThread.id)
           .eq('metadata->>type', 'portfolio')
           .maybeSingle();
-        if (existing && existing.id) {
+        if (existing?.error) {
+          console.warn('[Background] ⚠️ Portfolio existence check failed (continuing):', existing.error);
+        }
+        if (existing?.data?.id) {
           console.log('[Background] ℹ️ Portfolio already exists for this thread, skipping');
         } else {
           console.log('[Background] 🎨 Generating portfolio with Gemini...');
+          
+          // Light rate-limit guard: avoid back-to-back portfolio generations hitting Gemini 429.
+          await new Promise((r) => setTimeout(r, 2500));
 
           // Fetch full CV data for richer prompts (even if CV generation was skipped)
           const cvData = await getCompleteCVData(userId);
@@ -1682,7 +1688,11 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
         }
       }
     } catch (portfolioOuterErr) {
-      console.error('[Background] ❌ Portfolio generation failed (non-fatal):', portfolioOuterErr);
+      console.error('[Background] ❌ Portfolio generation failed (non-fatal):', {
+        name: portfolioOuterErr?.name,
+        message: portfolioOuterErr?.message,
+        stack: portfolioOuterErr?.stack
+      });
     }
 
     return generatedContent;
