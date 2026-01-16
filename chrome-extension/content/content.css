@@ -26,6 +26,8 @@
   white-space: nowrap;
   min-height: 40px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  position: relative;
+  overflow: hidden;
 }
 
 .swiftcareer-send-button:hover:not(:disabled) {
@@ -49,10 +51,55 @@
   line-height: 1;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 1;
+}
+
+.swiftcareer-logo {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  display: inline-block;
+  vertical-align: middle;
 }
 
 .swiftcareer-button-text {
   line-height: 1;
+  position: relative;
+  z-index: 1;
+}
+
+/* Premium Shimmer Effect - Only on idle state */
+.swiftcareer-send-button:not(.loading):not(.success):not(.error):not(.already-sent):not(:disabled)::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.3) 50%,
+    transparent
+  );
+  animation: shimmer 3s infinite;
+  z-index: 0;
+}
+
+@keyframes shimmer {
+  0% {
+    left: -100%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+/* Pause shimmer on hover for better interaction feedback */
+.swiftcareer-send-button:not(.loading):not(.success):not(.error):not(.already-sent):not(:disabled):hover::before {
+  animation-play-state: paused;
 }
 
 /* Loading state */

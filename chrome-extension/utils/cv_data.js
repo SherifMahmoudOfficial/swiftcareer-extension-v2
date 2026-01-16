@@ -103,15 +103,25 @@ export async function getCompleteCVData(userId) {
  */
 async function fetchWorkExperiences(client, userId) {
   try {
-    const { data, error } = await client
+    const rows = await client
       .from('work_experiences')
       .select('*')
-      .eq('user_id', userId)
-      .order('start_date', { ascending: false });
+      .eq('user_id', userId);
 
-    if (error) throw error;
+    if (!Array.isArray(rows)) {
+      console.warn('[CV Data] ⚠️ Work experiences query returned non-array:', typeof rows);
+      return [];
+    }
 
-    return (data || []).map(exp => ({
+    // Sort by start_date descending (newest first) in JavaScript
+    const sorted = rows.sort((a, b) => {
+      if (!a.start_date && !b.start_date) return 0;
+      if (!a.start_date) return 1;
+      if (!b.start_date) return -1;
+      return new Date(b.start_date) - new Date(a.start_date);
+    });
+
+    return sorted.map(exp => ({
       id: exp.id,
       company: exp.company,
       position: exp.position,
@@ -131,15 +141,25 @@ async function fetchWorkExperiences(client, userId) {
  */
 async function fetchEducations(client, userId) {
   try {
-    const { data, error } = await client
+    const rows = await client
       .from('educations')
       .select('*')
-      .eq('user_id', userId)
-      .order('end_date', { ascending: false });
+      .eq('user_id', userId);
 
-    if (error) throw error;
+    if (!Array.isArray(rows)) {
+      console.warn('[CV Data] ⚠️ Educations query returned non-array:', typeof rows);
+      return [];
+    }
 
-    return (data || []).map(edu => ({
+    // Sort by end_date descending (newest first) in JavaScript
+    const sorted = rows.sort((a, b) => {
+      if (!a.end_date && !b.end_date) return 0;
+      if (!a.end_date) return 1;
+      if (!b.end_date) return -1;
+      return new Date(b.end_date) - new Date(a.end_date);
+    });
+
+    return sorted.map(edu => ({
       id: edu.id,
       institution: edu.institution,
       degree: edu.degree,
@@ -159,15 +179,25 @@ async function fetchEducations(client, userId) {
  */
 async function fetchProjects(client, userId) {
   try {
-    const { data, error } = await client
+    const rows = await client
       .from('projects')
       .select('*')
-      .eq('user_id', userId)
-      .order('start_date', { ascending: false });
+      .eq('user_id', userId);
 
-    if (error) throw error;
+    if (!Array.isArray(rows)) {
+      console.warn('[CV Data] ⚠️ Projects query returned non-array:', typeof rows);
+      return [];
+    }
 
-    return (data || []).map(project => ({
+    // Sort by start_date descending (newest first) in JavaScript
+    const sorted = rows.sort((a, b) => {
+      if (!a.start_date && !b.start_date) return 0;
+      if (!a.start_date) return 1;
+      if (!b.start_date) return -1;
+      return new Date(b.start_date) - new Date(a.start_date);
+    });
+
+    return sorted.map(project => ({
       id: project.id,
       name: project.name,
       description: project.description,
@@ -187,15 +217,25 @@ async function fetchProjects(client, userId) {
  */
 async function fetchCertifications(client, userId) {
   try {
-    const { data, error } = await client
+    const rows = await client
       .from('certifications')
       .select('*')
-      .eq('user_id', userId)
-      .order('issue_date', { ascending: false });
+      .eq('user_id', userId);
 
-    if (error) throw error;
+    if (!Array.isArray(rows)) {
+      console.warn('[CV Data] ⚠️ Certifications query returned non-array:', typeof rows);
+      return [];
+    }
 
-    return (data || []).map(cert => ({
+    // Sort by issue_date descending (newest first) in JavaScript
+    const sorted = rows.sort((a, b) => {
+      if (!a.issue_date && !b.issue_date) return 0;
+      if (!a.issue_date) return 1;
+      if (!b.issue_date) return -1;
+      return new Date(b.issue_date) - new Date(a.issue_date);
+    });
+
+    return sorted.map(cert => ({
       id: cert.id,
       name: cert.name,
       issuer: cert.issuer,
@@ -214,14 +254,17 @@ async function fetchCertifications(client, userId) {
  */
 async function fetchLanguages(client, userId) {
   try {
-    const { data, error } = await client
+    const rows = await client
       .from('languages')
       .select('*')
       .eq('user_id', userId);
 
-    if (error) throw error;
+    if (!Array.isArray(rows)) {
+      console.warn('[CV Data] ⚠️ Languages query returned non-array:', typeof rows);
+      return [];
+    }
 
-    return (data || []).map(lang => ({
+    return rows.map(lang => ({
       id: lang.id,
       language: lang.language,
       proficiencyLevel: lang.proficiency_level
@@ -237,15 +280,25 @@ async function fetchLanguages(client, userId) {
  */
 async function fetchAwards(client, userId) {
   try {
-    const { data, error } = await client
+    const rows = await client
       .from('awards')
       .select('*')
-      .eq('user_id', userId)
-      .order('date', { ascending: false });
+      .eq('user_id', userId);
 
-    if (error) throw error;
+    if (!Array.isArray(rows)) {
+      console.warn('[CV Data] ⚠️ Awards query returned non-array:', typeof rows);
+      return [];
+    }
 
-    return (data || []).map(award => ({
+    // Sort by date descending (newest first) in JavaScript
+    const sorted = rows.sort((a, b) => {
+      if (!a.date && !b.date) return 0;
+      if (!a.date) return 1;
+      if (!b.date) return -1;
+      return new Date(b.date) - new Date(a.date);
+    });
+
+    return sorted.map(award => ({
       id: award.id,
       title: award.title,
       issuer: award.issuer,

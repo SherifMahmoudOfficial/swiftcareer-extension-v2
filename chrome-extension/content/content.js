@@ -243,6 +243,180 @@ async function extractAboutTheJobSection() {
 }
 
 /**
+ * Extract job information from top card container
+ * Finds the top card section above buttons and extracts title, company, location comprehensively
+ */
+function extractFromTopCardContainer() {
+  console.log('[Content Script] 🔍 Looking for top card container...');
+  
+  // Try to find the top card container
+  const topCardSelectors = [
+    '.jobs-details-top-card',
+    '[class*="jobs-details-top-card"]',
+    '.jobs-details__top-card',
+    '.jobs-details__main-content > div:first-child',
+    'main > div:first-child > div:first-child'
+  ];
+  
+  let topCardContainer = null;
+  for (const selector of topCardSelectors) {
+    topCardContainer = document.querySelector(selector);
+    if (topCardContainer) {
+      console.log(`[Content Script] ✅ Found top card container using selector: "${selector}"`);
+      break;
+    }
+  }
+  
+  if (!topCardContainer) {
+    console.log('[Content Script] ⚠️ Top card container not found, will use fallback selectors');
+    return { title: '', company: '', location: '' };
+  }
+  
+  const containerText = topCardContainer.textContent || '';
+  const containerHTML = topCardContainer.innerHTML || '';
+  console.log('[Content Script] 📋 Top card container found, analyzing structure...');
+  console.log('[Content Script] 📏 Container text length:', containerText.length, 'chars');
+  
+  const result = { title: '', company: '', location: '' };
+  
+  // Extract title - look for h1 or heading elements first
+  const titleSelectors = [
+    'h1',
+    'h1.jobs-details-top-card__job-title',
+    'h1[class*="job-title"]',
+    '.jobs-details-top-card__job-title',
+    '.jobs-details-top-card__job-title-link',
+    '[data-test-id="job-title"]',
+    'h2',
+    'h3'
+  ];
+  
+  for (const selector of titleSelectors) {
+    const element = topCardContainer.querySelector(selector);
+    if (element) {
+      const text = element.textContent?.trim() || '';
+      if (text && text.length > 3) {
+        result.title = text;
+        console.log(`[Content Script] ✅ Found title in container using "${selector}":`, text.substring(0, 80));
+        break;
+      }
+    }
+  }
+  
+  // Extract company - look for links and company-related elements
+  const companySelectors = [
+    '.jobs-details-top-card__company-name',
+    '.jobs-details-top-card__company-name a',
+    '.jobs-details-top-card__company-info a',
+    'a[data-test-id="company-name"]',
+    '[data-test-id="company-name"]',
+    '.jobs-company__box a',
+    'a[href*="/company/"]',
+    'a[href*="/company"]'
+  ];
+  
+  for (const selector of companySelectors) {
+    const element = topCardContainer.querySelector(selector);
+    if (element) {
+      const text = element.textContent?.trim() || '';
+      if (text && text.length > 1) {
+        result.company = text;
+        console.log(`[Content Script] ✅ Found company in container using "${selector}":`, text);
+        break;
+      }
+    }
+  }
+  
+  // Extract location - look for location indicators and bullet points
+  const locationSelectors = [
+    '.jobs-details-top-card__bullet',
+    '.jobs-details-top-card__job-info-item',
+    '.jobs-details-top-card__primary-description-without-tagline',
+    '[data-test-id="job-location"]',
+    '.jobs-details-top-card__job-info li',
+    '.jobs-details-top-card__job-info span',
+    'span[class*="location"]',
+    'span[class*="bullet"]',
+    'li[class*="job-info"]'
+  ];
+  
+  for (const selector of locationSelectors) {
+    const elements = topCardContainer.querySelectorAll(selector);
+    for (const element of elements) {
+      const text = element.textContent?.trim() || '';
+      // Location usually contains city, country, or "Remote"
+      if (text && (text.includes(',') || text.includes('Remote') || text.match(/[A-Z][a-z]+/))) {
+        result.location = text;
+        console.log(`[Content Script] ✅ Found location in container using "${selector}":`, text);
+        break;
+      }
+    }
+    if (result.location) break;
+  }
+  
+  // Fallback: Parse container text if specific selectors didn't work
+  if (!result.title || !result.company || !result.location) {
+    console.log('[Content Script] 🔄 Some fields missing, attempting text parsing fallback...');
+    
+    // Try to extract from structured text
+    const lines = containerText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    console.log('[Content Script] 📝 Container has', lines.length, 'non-empty lines');
+    
+    // Title is usually the first significant line (h1 content)
+    if (!result.title && lines.length > 0) {
+      // Skip very short lines and button text
+      for (const line of lines) {
+        if (line.length > 5 && 
+            !line.toLowerCase().includes('apply') && 
+            !line.toLowerCase().includes('save') &&
+            !line.match(/^\d+$/)) {
+          result.title = line;
+          console.log('[Content Script] ✅ Extracted title from text parsing:', result.title);
+          break;
+        }
+      }
+    }
+    
+    // Company usually appears after title
+    if (!result.company) {
+      let foundTitle = false;
+      for (const line of lines) {
+        if (foundTitle && line.length > 2 && line.length < 100) {
+          // Skip common non-company text
+          if (!line.toLowerCase().includes('full-time') &&
+              !line.toLowerCase().includes('part-time') &&
+              !line.toLowerCase().includes('contract') &&
+              !line.match(/^\d+\s*(applicants?|views?)$/i)) {
+            result.company = line;
+            console.log('[Content Script] ✅ Extracted company from text parsing:', result.company);
+            break;
+          }
+        }
+        if (line === result.title) {
+          foundTitle = true;
+        }
+      }
+    }
+    
+    // Location usually has comma, "Remote", or city name pattern
+    if (!result.location) {
+      for (const line of lines) {
+        if ((line.includes(',') || 
+             line.toLowerCase().includes('remote') ||
+             line.match(/^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:,\s*[A-Z][a-z]+)*$/)) &&
+            line.length < 100) {
+          result.location = line;
+          console.log('[Content Script] ✅ Extracted location from text parsing:', result.location);
+          break;
+        }
+      }
+    }
+  }
+  
+  return result;
+}
+
+/**
  * Extract job information from DOM
  * Tries multiple selectors to find job title, company, location, and description
  */
@@ -257,6 +431,15 @@ async function extractJobInfoFromDOM() {
     employmentType: '',
     experienceLevel: ''
   };
+
+  // First, try to extract from top card container (comprehensive approach)
+  console.log('[Content Script] 🎯 Step 1: Extracting from top card container...');
+  const topCardData = extractFromTopCardContainer();
+  
+  // Use top card data if found
+  if (topCardData.title) extractedData.title = topCardData.title;
+  if (topCardData.company) extractedData.company = topCardData.company;
+  if (topCardData.location) extractedData.location = topCardData.location;
 
   // Helper function to find text using multiple selectors
   function findText(selectors, fieldName) {
@@ -275,38 +458,47 @@ async function extractJobInfoFromDOM() {
     return '';
   }
 
-  // Extract job title
-  const titleSelectors = [
-    '.jobs-details-top-card__job-title',
-    'h1.job-title',
-    'h1[class*="job-title"]',
-    '.jobs-details-top-card__job-title-link',
-    '[data-test-id="job-title"]',
-    'h1'
-  ];
-  extractedData.title = findText(titleSelectors, 'title');
+  // Fallback: Extract job title if not found in container
+  if (!extractedData.title) {
+    console.log('[Content Script] 🎯 Step 2: Trying fallback selectors for title...');
+    const titleSelectors = [
+      '.jobs-details-top-card__job-title',
+      'h1.job-title',
+      'h1[class*="job-title"]',
+      '.jobs-details-top-card__job-title-link',
+      '[data-test-id="job-title"]',
+      'h1'
+    ];
+    extractedData.title = findText(titleSelectors, 'title');
+  }
 
-  // Extract company name
-  const companySelectors = [
-    '.jobs-details-top-card__company-name',
-    '.jobs-details-top-card__company-info a',
-    'a[data-test-id="company-name"]',
-    '.jobs-company__box a',
-    '[data-test-id="company-name"]',
-    '.jobs-details-top-card__company-name a'
-  ];
-  extractedData.company = findText(companySelectors, 'company');
+  // Fallback: Extract company name if not found in container
+  if (!extractedData.company) {
+    console.log('[Content Script] 🎯 Step 3: Trying fallback selectors for company...');
+    const companySelectors = [
+      '.jobs-details-top-card__company-name',
+      '.jobs-details-top-card__company-info a',
+      'a[data-test-id="company-name"]',
+      '.jobs-company__box a',
+      '[data-test-id="company-name"]',
+      '.jobs-details-top-card__company-name a'
+    ];
+    extractedData.company = findText(companySelectors, 'company');
+  }
 
-  // Extract location
-  const locationSelectors = [
-    '.jobs-details-top-card__bullet',
-    '.jobs-details-top-card__job-info-item',
-    '.jobs-details-top-card__primary-description-without-tagline',
-    '[data-test-id="job-location"]',
-    '.jobs-details-top-card__job-info li',
-    '.jobs-details-top-card__job-info span'
-  ];
-  extractedData.location = findText(locationSelectors, 'location');
+  // Fallback: Extract location if not found in container
+  if (!extractedData.location) {
+    console.log('[Content Script] 🎯 Step 4: Trying fallback selectors for location...');
+    const locationSelectors = [
+      '.jobs-details-top-card__bullet',
+      '.jobs-details-top-card__job-info-item',
+      '.jobs-details-top-card__primary-description-without-tagline',
+      '[data-test-id="job-location"]',
+      '.jobs-details-top-card__job-info li',
+      '.jobs-details-top-card__job-info span'
+    ];
+    extractedData.location = findText(locationSelectors, 'location');
+  }
 
   // Extract "About the job" section first (highest priority)
   extractedData.aboutTheJob = await extractAboutTheJobSection();
@@ -456,8 +648,12 @@ function createButton() {
   const button = document.createElement('button');
   button.className = 'swiftcareer-send-button';
   button.setAttribute('aria-label', 'Send to SwiftCareer');
+  
+  const logoUrl = chrome.runtime.getURL('icons/logo.png');
   button.innerHTML = `
-    <span class="swiftcareer-button-icon">📊</span>
+    <span class="swiftcareer-button-icon">
+      <img src="${logoUrl}" alt="SwiftCareer" class="swiftcareer-logo">
+    </span>
     <span class="swiftcareer-button-text">Send to SwiftCareer</span>
   `;
   
@@ -478,6 +674,7 @@ function updateButtonState(status, message = '') {
   const button = buttonState.element;
   const icon = button.querySelector('.swiftcareer-button-icon');
   const text = button.querySelector('.swiftcareer-button-text');
+  const logoImg = icon.querySelector('.swiftcareer-logo');
   
   // Reset classes
   button.className = 'swiftcareer-send-button';
@@ -487,12 +684,14 @@ function updateButtonState(status, message = '') {
     case 'loading':
       button.classList.add('loading');
       button.disabled = true;
+      if (logoImg) logoImg.style.display = 'none';
       icon.textContent = '⏳';
       text.textContent = 'Sending...';
       break;
       
     case 'success':
       button.classList.add('success');
+      if (logoImg) logoImg.style.display = 'none';
       icon.textContent = '✓';
       text.textContent = 'Sent successfully!';
       button.disabled = true;
@@ -506,6 +705,7 @@ function updateButtonState(status, message = '') {
       
     case 'alreadySent':
       button.classList.add('already-sent');
+      if (logoImg) logoImg.style.display = 'none';
       icon.textContent = '✓';
       text.textContent = 'Already sent';
       button.disabled = true;
@@ -513,6 +713,7 @@ function updateButtonState(status, message = '') {
       
     case 'error':
       button.classList.add('error');
+      if (logoImg) logoImg.style.display = 'none';
       icon.textContent = '⚠';
       text.textContent = message || 'Error occurred';
       // Reset after 3 seconds
@@ -525,7 +726,18 @@ function updateButtonState(status, message = '') {
       
     case 'idle':
     default:
-      icon.textContent = '📊';
+      icon.textContent = '';
+      if (logoImg) {
+        logoImg.style.display = 'inline-block';
+      } else {
+        // Recreate logo if it doesn't exist
+        const logoUrl = chrome.runtime.getURL('icons/logo.png');
+        const newLogo = document.createElement('img');
+        newLogo.src = logoUrl;
+        newLogo.alt = 'SwiftCareer';
+        newLogo.className = 'swiftcareer-logo';
+        icon.appendChild(newLogo);
+      }
       text.textContent = 'Send to SwiftCareer';
       break;
   }

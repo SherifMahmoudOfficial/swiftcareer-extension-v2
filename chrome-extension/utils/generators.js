@@ -308,7 +308,10 @@ export async function generateTailoredCV({
     company: jobData.company,
     jobSkillsCount: jobSkills.length,
     hasInstructions: !!userInstructions,
-    hasFocusLabel: !!focusLabel
+    hasFocusLabel: !!focusLabel,
+    cvDataSummary: cvData.user?.summary?.substring(0, 100) || 'N/A',
+    workExperiencesCount: cvData.workExperiences?.length || 0,
+    projectsCount: cvData.projects?.length || 0
   });
 
   const systemPrompt = `You are a professional CV tailoring expert. Your PRIMARY GOAL is to MAXIMIZE the job match percentage by making AGGRESSIVE, SIGNIFICANT improvements.
@@ -341,6 +344,10 @@ Return ONLY valid JSON with this structure:
 
   // Build comprehensive user prompt
   const userPrompt = buildCVTailoringPrompt(cvData, jobData, userInstructions, focusLabel);
+  
+  console.log('[Generators] 📤 Sending request to DeepSeek API...');
+  console.log('[Generators] 📋 Prompt length:', userPrompt.length, 'characters');
+  console.log('[Generators] 📋 Prompt preview (first 500 chars):', userPrompt.substring(0, 500));
 
   try {
     const content = await callDeepSeekAPI(
@@ -353,31 +360,226 @@ Return ONLY valid JSON with this structure:
       90000 // 90 seconds timeout
     );
 
-    const tailoredPatch = JSON.parse(content);
+    console.log('[Generators] 📥 Received response from DeepSeek API');
+    console.log('[Generators] 📥 Response length:', content.length, 'characters');
+    console.log('[Generators] 📥 Response preview (first 500 chars):', content.substring(0, 500));
+
+    // Parse JSON with detailed error handling
+    let tailoredPatch;
+    try {
+      // Try to extract JSON if wrapped in markdown code blocks
+      let jsonContent = content.trim();
+      if (jsonContent.startsWith('```')) {
+        const jsonMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+        if (jsonMatch && jsonMatch[1]) {
+          jsonContent = jsonMatch[1].trim();
+          console.log('[Generators] 🔧 Extracted JSON from markdown code block');
+        }
+      }
+      
+      tailoredPatch = JSON.parse(jsonContent);
+      console.log('[Generators] ✅ JSON parsed successfully');
+    } catch (parseError) {
+      console.error('[Generators] ❌ JSON parsing failed:', parseError);
+      console.error('[Generators] ❌ Raw response:', content);
+      console.error('[Generators] ❌ Parse error details:', {
+        message: parseError.message,
+        name: parseError.name
+      });
+      // Don't throw - use fallback strategy instead
+      console.warn('[Generators] ⚠️ Using fallback strategy due to JSON parse error');
+      tailoredPatch = null;
+    }
+
+    // Validate and build validated patch with smart fallback
+    console.log('[Generators] 🔍 Validating parsed data...');
     
-    console.log('[Generators] ✅ Tailored CV generated:', {
-      hasSummary: !!tailoredPatch.summary,
-      skillsCount: tailoredPatch.skills?.length || 0,
-      highlightsCount: tailoredPatch.highlights?.length || 0,
-      experiencesCount: tailoredPatch.experiences?.length || 0
+    if (!tailoredPatch || typeof tailoredPatch !== 'object') {
+      console.warn('[Generators] ⚠️ Invalid tailoredPatch, using fallback');
+      tailoredPatch = {};
+    }
+    
+    console.log('[Generators] 🔍 Parsed data keys:', Object.keys(tailoredPatch || {}));
+    console.log('[Generators] 🔍 Has summary:', !!tailoredPatch?.summary, 'Length:', tailoredPatch?.summary?.length || 0);
+    console.log('[Generators] 🔍 Has focus_summary:', !!tailoredPatch?.focus_summary);
+    console.log('[Generators] 🔍 Skills:', tailoredPatch?.skills?.length || 0, 'items');
+    console.log('[Generators] 🔍 Highlights:', tailoredPatch?.highlights?.length || 0, 'items');
+    console.log('[Generators] 🔍 Experiences:', tailoredPatch?.experiences?.length || 0, 'items');
+
+    // Smart fallback strategy: merge API response with original data
+    // Priority: API response > Original CV data > Empty defaults (but never completely empty)
+    const originalSummary = cvData.user?.summary || '';
+    const originalSkills = cvData.user?.skills || [];
+    const originalExperiences = cvData.workExperiences || [];
+    
+    // Build validated patch with intelligent fallback
+    let validatedSummary = '';
+    if (tailoredPatch.summary && typeof tailoredPatch.summary === 'string' && tailoredPatch.summary.trim().length > 0) {
+      validatedSummary = tailoredPatch.summary.trim();
+      console.log('[Generators] ✅ Using API summary (length:', validatedSummary.length, ')');
+    } else if (originalSummary && originalSummary.trim().length > 0) {
+      validatedSummary = originalSummary.trim();
+      console.log('[Generators] ⚠️ API summary empty, using original summary (length:', validatedSummary.length, ')');
+    } else {
+      // Last resort: create a basic summary from available data
+      const skillsText = originalSkills.length > 0 ? originalSkills.slice(0, 5).join(', ') : 'various skills';
+      const expText = originalExperiences.length > 0 ? `${originalExperiences.length} years of experience` : 'professional experience';
+      validatedSummary = `Experienced professional with ${expText} in ${skillsText}.`;
+      console.log('[Generators] ⚠️ No summary available, created fallback summary');
+    }
+
+    let validatedSkills = [];
+    if (Array.isArray(tailoredPatch.skills) && tailoredPatch.skills.length > 0) {
+      validatedSkills = tailoredPatch.skills.filter(s => s && typeof s === 'string' && s.trim().length > 0);
+      console.log('[Generators] ✅ Using API skills (count:', validatedSkills.length, ')');
+    }
+    if (validatedSkills.length === 0 && originalSkills.length > 0) {
+      validatedSkills = [...originalSkills];
+      console.log('[Generators] ⚠️ API skills empty, using original skills (count:', validatedSkills.length, ')');
+    }
+
+    let validatedHighlights = [];
+    if (Array.isArray(tailoredPatch.highlights) && tailoredPatch.highlights.length > 0) {
+      validatedHighlights = tailoredPatch.highlights.filter(h => 
+        h && typeof h === 'object' && 
+        h.text && typeof h.text === 'string' && h.text.trim().length > 0
+      );
+      console.log('[Generators] ✅ Using API highlights (count:', validatedHighlights.length, ')');
+    }
+    // If highlights are empty but we have experiences, create highlights from experiences
+    if (validatedHighlights.length === 0 && originalExperiences.length > 0) {
+      validatedHighlights = originalExperiences
+        .slice(0, 5)
+        .filter(exp => exp.description && exp.description.trim().length > 0)
+        .map((exp, idx) => ({
+          text: exp.description.substring(0, 150) + (exp.description.length > 150 ? '...' : ''),
+          source: 'experience',
+          index: idx
+        }));
+      console.log('[Generators] ⚠️ API highlights empty, created from experiences (count:', validatedHighlights.length, ')');
+    }
+
+    let validatedExperiences = [];
+    if (Array.isArray(tailoredPatch.experiences) && tailoredPatch.experiences.length > 0) {
+      validatedExperiences = tailoredPatch.experiences.filter(exp => 
+        exp && typeof exp === 'object' && 
+        typeof exp.index === 'number' &&
+        exp.description && typeof exp.description === 'string' && exp.description.trim().length > 0
+      );
+      console.log('[Generators] ✅ Using API experiences (count:', validatedExperiences.length, ')');
+    }
+    // If experiences are empty but we have original experiences, use them
+    if (validatedExperiences.length === 0 && originalExperiences.length > 0) {
+      validatedExperiences = originalExperiences.map((exp, idx) => ({
+        index: idx,
+        description: exp.description || `${exp.position || 'Position'} at ${exp.company || 'Company'}`
+      }));
+      console.log('[Generators] ⚠️ API experiences empty, using original experiences (count:', validatedExperiences.length, ')');
+    }
+
+    const validatedPatch = {
+      summary: validatedSummary,
+      focus_summary: tailoredPatch.focus_summary || null,
+      skills: validatedSkills,
+      highlights: validatedHighlights,
+      experiences: validatedExperiences
+    };
+
+    // Final validation: ensure we never return completely empty data
+    if (!validatedPatch.summary || validatedPatch.summary.trim().length === 0) {
+      console.error('[Generators] ❌ CRITICAL: Summary is still empty after all fallbacks!');
+      validatedPatch.summary = 'Professional with relevant experience and skills.';
+    }
+    if (validatedPatch.skills.length === 0) {
+      console.error('[Generators] ❌ CRITICAL: Skills array is still empty after all fallbacks!');
+      validatedPatch.skills = ['Professional Skills'];
+    }
+
+    console.log('[Generators] ✅ Tailored CV generated and validated:', {
+      hasSummary: !!validatedPatch.summary,
+      summaryLength: validatedPatch.summary.length,
+      hasFocusSummary: !!validatedPatch.focus_summary,
+      skillsCount: validatedPatch.skills.length,
+      highlightsCount: validatedPatch.highlights.length,
+      experiencesCount: validatedPatch.experiences.length,
+      summaryPreview: validatedPatch.summary.substring(0, 100) + (validatedPatch.summary.length > 100 ? '...' : '')
     });
 
-    return tailoredPatch;
+    // Log full data structure for debugging
+    console.log('[Generators] 📊 Full tailored patch structure:', JSON.stringify(validatedPatch, null, 2));
+
+    return validatedPatch;
   } catch (error) {
     console.error('[Generators] ❌ Error generating tailored CV:', error);
+    console.error('[Generators] ❌ Error details:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
+    
     // Return fallback stub content instead of throwing
     if (error.message && error.message.includes('API key not configured')) {
       throw error; // Re-throw configuration errors
     }
-    console.warn('[Generators] ⚠️ Returning fallback CV data');
-    // Return original CV data structure as fallback
-    return {
-      summary: cvData.user?.summary || '',
+    
+    console.warn('[Generators] ⚠️ Returning fallback CV data due to error');
+    
+    // Build comprehensive fallback using original CV data
+    const originalSummary = cvData.user?.summary || '';
+    const originalSkills = cvData.user?.skills || [];
+    const originalExperiences = cvData.workExperiences || [];
+    
+    // Ensure summary is never empty
+    let fallbackSummary = originalSummary;
+    if (!fallbackSummary || fallbackSummary.trim().length === 0) {
+      const skillsText = originalSkills.length > 0 ? originalSkills.slice(0, 5).join(', ') : 'various skills';
+      const expText = originalExperiences.length > 0 ? `${originalExperiences.length} years of experience` : 'professional experience';
+      fallbackSummary = `Experienced professional with ${expText} in ${skillsText}.`;
+      console.log('[Generators] ⚠️ Created fallback summary from available data');
+    }
+    
+    // Ensure skills is never empty
+    let fallbackSkills = originalSkills.length > 0 ? [...originalSkills] : ['Professional Skills'];
+    
+    // Create highlights from experiences if available
+    let fallbackHighlights = [];
+    if (originalExperiences.length > 0) {
+      fallbackHighlights = originalExperiences
+        .slice(0, 5)
+        .filter(exp => exp.description && exp.description.trim().length > 0)
+        .map((exp, idx) => ({
+          text: exp.description.substring(0, 150) + (exp.description.length > 150 ? '...' : ''),
+          source: 'experience',
+          index: idx
+        }));
+    }
+    
+    // Create experiences array from original work experiences
+    let fallbackExperiences = [];
+    if (originalExperiences.length > 0) {
+      fallbackExperiences = originalExperiences.map((exp, idx) => ({
+        index: idx,
+        description: exp.description || `${exp.position || 'Position'} at ${exp.company || 'Company'}`
+      }));
+    }
+    
+    const fallbackData = {
+      summary: fallbackSummary,
       focus_summary: null,
-      skills: cvData.user?.skills || [],
-      highlights: [],
-      experiences: []
+      skills: fallbackSkills,
+      highlights: fallbackHighlights,
+      experiences: fallbackExperiences
     };
+    
+    console.log('[Generators] ⚠️ Fallback data:', {
+      hasSummary: !!fallbackData.summary,
+      summaryLength: fallbackData.summary.length,
+      skillsCount: fallbackData.skills.length,
+      highlightsCount: fallbackData.highlights.length,
+      experiencesCount: fallbackData.experiences.length
+    });
+    
+    return fallbackData;
   }
 }
 
@@ -420,34 +622,122 @@ Headline: ${cvData.user?.headline || ''}
 Summary: ${cvData.user?.summary || ''}
 Skills: ${(cvData.user?.skills || []).join(', ')}
 Location: ${cvData.user?.location || ''}
+Email: ${cvData.user?.email || ''}
+LinkedIn: ${cvData.user?.linkedin || ''}
 
 `;
 
+  // Enhanced work experiences with more detail
   if (cvData.workExperiences && cvData.workExperiences.length > 0) {
-    prompt += `Work Experiences:\n`;
+    prompt += `Work Experiences (${cvData.workExperiences.length} positions):\n`;
     cvData.workExperiences.forEach((exp, index) => {
-      prompt += `${index}. ${exp.position || ''} at ${exp.company || ''} (${exp.startDate || ''} - ${exp.endDate || 'Present'})\n`;
-      prompt += `   Description: ${exp.description || ''}\n\n`;
+      prompt += `${index}. Position: ${exp.position || 'N/A'}\n`;
+      prompt += `   Company: ${exp.company || 'N/A'}\n`;
+      prompt += `   Period: ${exp.startDate || 'N/A'} - ${exp.endDate || exp.current ? 'Present' : 'N/A'}\n`;
+      prompt += `   Description: ${exp.description || 'No description provided'}\n`;
+      if (exp.description && exp.description.trim().length === 0) {
+        prompt += `   ⚠️ WARNING: This experience has no description. Use the position and company name to create relevant achievements.\n`;
+      }
+      prompt += `\n`;
     });
+  } else {
+    prompt += `Work Experiences: None provided\n\n`;
   }
 
+  // Enhanced projects with more detail
   if (cvData.projects && cvData.projects.length > 0) {
-    prompt += `Projects:\n`;
+    prompt += `Projects (${cvData.projects.length} projects):\n`;
     cvData.projects.forEach((project, index) => {
-      prompt += `${index}. ${project.name || ''}\n`;
-      prompt += `   Description: ${project.description || ''}\n`;
-      prompt += `   Technologies: ${(project.technologies || []).join(', ')}\n\n`;
+      prompt += `${index}. Project Name: ${project.name || 'N/A'}\n`;
+      prompt += `   Description: ${project.description || 'No description provided'}\n`;
+      prompt += `   Technologies: ${(project.technologies || []).join(', ') || 'None specified'}\n`;
+      if (project.url) {
+        prompt += `   URL: ${project.url}\n`;
+      }
+      if (project.startDate || project.endDate) {
+        prompt += `   Period: ${project.startDate || 'N/A'} - ${project.endDate || 'N/A'}\n`;
+      }
+      prompt += `\n`;
     });
+  } else {
+    prompt += `Projects: None provided\n\n`;
   }
 
+  // Enhanced education
   if (cvData.educations && cvData.educations.length > 0) {
-    prompt += `Education:\n`;
+    prompt += `Education (${cvData.educations.length} entries):\n`;
     cvData.educations.forEach((edu, index) => {
-      prompt += `${index}. ${edu.degree || ''} in ${edu.field || ''} from ${edu.institution || ''}\n\n`;
+      prompt += `${index}. Degree: ${edu.degree || 'N/A'}\n`;
+      prompt += `   Field: ${edu.field || 'N/A'}\n`;
+      prompt += `   Institution: ${edu.institution || 'N/A'}\n`;
+      if (edu.startDate || edu.endDate) {
+        prompt += `   Period: ${edu.startDate || 'N/A'} - ${edu.endDate || 'N/A'}\n`;
+      }
+      if (edu.gpa) {
+        prompt += `   GPA: ${edu.gpa}\n`;
+      }
+      prompt += `\n`;
     });
   }
 
-  prompt += `\nTailor this CV to maximize job match. Return JSON with the structure specified in the system prompt.`;
+  // Add certifications if available
+  if (cvData.certifications && cvData.certifications.length > 0) {
+    prompt += `Certifications (${cvData.certifications.length} certifications):\n`;
+    cvData.certifications.forEach((cert, index) => {
+      prompt += `${index}. ${cert.name || 'N/A'} from ${cert.issuer || 'N/A'}\n`;
+      if (cert.issueDate) {
+        prompt += `   Issued: ${cert.issueDate}\n`;
+      }
+      prompt += `\n`;
+    });
+  }
+
+  // Add awards if available
+  if (cvData.awards && cvData.awards.length > 0) {
+    prompt += `Awards (${cvData.awards.length} awards):\n`;
+    cvData.awards.forEach((award, index) => {
+      prompt += `${index}. ${award.title || 'N/A'}\n`;
+      if (award.issuer) {
+        prompt += `   Issuer: ${award.issuer}\n`;
+      }
+      if (award.description) {
+        prompt += `   Description: ${award.description}\n`;
+      }
+      prompt += `\n`;
+    });
+  }
+
+  // Add example output structure to help AI understand
+  prompt += `\nIMPORTANT: You must return a JSON object with this EXACT structure:
+{
+  "summary": "A rephrased professional summary (2-4 sentences) that highlights the candidate's most relevant experience and skills for this specific job. MUST be non-empty.",
+  "focus_summary": "A short label (1-3 words) that captures the focus area, or null if not applicable",
+  "skills": ["Prioritized", "list", "of", "skills", "from", "the", "candidate's", "profile", "that", "match", "the", "job", "requirements"],
+  "highlights": [
+    {
+      "text": "A rephrased achievement or highlight from work experiences or projects that is relevant to the job",
+      "source": "experience",
+      "index": 0
+    }
+  ],
+  "experiences": [
+    {
+      "index": 0,
+      "description": "An enhanced description for this work experience focusing on aspects most relevant to the job"
+    }
+  ]
+}
+
+CRITICAL REQUIREMENTS:
+1. The "summary" field MUST be non-empty. If the original summary is empty, create one based on work experiences and skills.
+2. The "skills" array MUST contain at least some skills from the candidate's profile, prioritized by job relevance.
+3. The "highlights" array should contain 3-8 relevant achievements from work experiences or projects.
+4. The "experiences" array should have one entry per work experience, with enhanced descriptions.
+5. NEVER add information that is not present in the CV data above.
+6. Use synonyms and keywords from the job description intelligently.
+7. Focus on aspects most relevant to the job requirements.
+
+Now tailor this CV to maximize job match. Return ONLY the JSON object, no other text.`;
 
   return prompt;
 }

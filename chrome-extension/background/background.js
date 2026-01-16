@@ -410,6 +410,32 @@ async function getUserMessagePreferences(userId) {
 }
 
 /**
+ * Calculate match percentage between user skills and job skills
+ * @param {Array<string>} userSkills - User's skills
+ * @param {Array<string>} jobSkills - Job required skills
+ * @returns {number} Match percentage (0-100)
+ */
+function calculateMatchPercentage(userSkills, jobSkills) {
+  if (!jobSkills || jobSkills.length === 0) return 0;
+  if (!userSkills || userSkills.length === 0) return 0;
+  
+  const normalizedJob = jobSkills.map(s => s.toLowerCase().trim()).filter(s => s.length > 0);
+  const normalizedUser = userSkills.map(s => s.toLowerCase().trim()).filter(s => s.length > 0);
+  
+  if (normalizedJob.length === 0) return 0;
+  
+  // Count matching skills (case-insensitive, partial match allowed)
+  const matching = normalizedUser.filter(userSkill => 
+    normalizedJob.some(jobSkill => 
+      jobSkill.includes(userSkill) || userSkill.includes(jobSkill) || jobSkill === userSkill
+    )
+  );
+  
+  const percentage = Math.round((matching.length / normalizedJob.length) * 100);
+  return Math.min(100, Math.max(0, percentage)); // Clamp between 0-100
+}
+
+/**
  * Generate CV, Cover Letter, and Interview QA after job analysis
  */
 async function generateContentAfterJobAnalysis(userId, chatThread, analysisResult, userProfile, userSkills) {
@@ -483,11 +509,60 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
         const cvData = await getCompleteCVData(userId);
         console.log('[Background] 📋 CV data fetched:', {
           hasUser: !!cvData.user,
+          userSummary: cvData.user?.summary?.substring(0, 100) || 'N/A',
+          userSummaryLength: cvData.user?.summary?.length || 0,
+          userSkillsCount: cvData.user?.skills?.length || 0,
+          userSkills: cvData.user?.skills || [],
           workExperiencesCount: cvData.workExperiences?.length || 0,
-          projectsCount: cvData.projects?.length || 0
+          projectsCount: cvData.projects?.length || 0,
+          educationsCount: cvData.educations?.length || 0
         });
         
+        // Guardrail: Validate CV data arrays before proceeding
+        console.log('[Background] 🔍 Guardrail: Validating CV data arrays...');
+        console.log('[Background] 🔍 workExperiences:', {
+          isArray: Array.isArray(cvData.workExperiences),
+          count: cvData.workExperiences?.length || 0,
+          firstItem: cvData.workExperiences?.[0] ? {
+            company: cvData.workExperiences[0].company,
+            position: cvData.workExperiences[0].position,
+            hasDescription: !!cvData.workExperiences[0].description
+          } : null
+        });
+        console.log('[Background] 🔍 projects:', {
+          isArray: Array.isArray(cvData.projects),
+          count: cvData.projects?.length || 0,
+          firstItem: cvData.projects?.[0] ? {
+            name: cvData.projects[0].name,
+            hasDescription: !!cvData.projects[0].description
+          } : null
+        });
+        
+        // Validate CV data before proceeding
+        if (!cvData.user) {
+          console.error('[Background] ❌ CRITICAL: CV data has no user object!');
+          throw new Error('CV data is missing user information');
+        }
+        if (!cvData.user.summary || cvData.user.summary.trim().length === 0) {
+          console.warn('[Background] ⚠️ WARNING: CV data has empty summary');
+        }
+        if (!cvData.user.skills || cvData.user.skills.length === 0) {
+          console.warn('[Background] ⚠️ WARNING: CV data has no skills');
+        }
+        if (!cvData.workExperiences || cvData.workExperiences.length === 0) {
+          console.warn('[Background] ⚠️ WARNING: CV data has no work experiences - highlights/experiences may be empty');
+        }
+        
         // Generate tailored CV
+        console.log('[Background] 📤 Calling generateTailoredCV with:', {
+          cvDataUser: cvData.user?.fullName || 'N/A',
+          cvDataSummaryLength: cvData.user?.summary?.length || 0,
+          cvDataSkillsCount: cvData.user?.skills?.length || 0,
+          jobTitle: jobData.title,
+          jobCompany: jobData.company,
+          jobSkillsCount: jobData.skills.length
+        });
+        
         const tailoredPatch = await generateTailoredCV({
           cvData: cvData,
           jobData: jobData,
@@ -496,23 +571,188 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
           focusLabel: null
         });
 
-        // Build CV data structure
-        const cvDataWithReport = {
-          summary: tailoredPatch.summary || cvData.user.summary,
-          focus_summary: tailoredPatch.focus_summary,
-          skills: tailoredPatch.skills || cvData.user.skills,
+        console.log('[Background] 📥 Received tailoredPatch from generateTailoredCV');
+        console.log('[Background] 📥 tailoredPatch structure:', {
+          hasSummary: !!tailoredPatch.summary,
+          summaryLength: tailoredPatch.summary?.length || 0,
+          summaryPreview: tailoredPatch.summary?.substring(0, 100) || 'N/A',
+          hasFocusSummary: !!tailoredPatch.focus_summary,
+          focusSummary: tailoredPatch.focus_summary,
+          skillsCount: tailoredPatch.skills?.length || 0,
+          skills: tailoredPatch.skills || [],
+          highlightsCount: tailoredPatch.highlights?.length || 0,
           highlights: tailoredPatch.highlights || [],
-          experiences: tailoredPatch.experiences || [],
-          matchBefore: 0, // Can be calculated if needed
-          matchAfter: 0, // Can be calculated if needed
+          experiencesCount: tailoredPatch.experiences?.length || 0,
+          experiences: tailoredPatch.experiences || []
+        });
+        console.log('[Background] 📥 Full tailoredPatch JSON:', JSON.stringify(tailoredPatch, null, 2));
+
+        // Validate tailoredPatch before building
+        console.log('[Background] 🔍 Validating tailoredPatch before building cvDataWithReport...');
+        console.log('[Background] 🔍 Original CV data:', {
+          hasUserSummary: !!cvData.user?.summary,
+          userSummaryLength: cvData.user?.summary?.length || 0,
+          userSkillsCount: cvData.user?.skills?.length || 0,
+          workExperiencesCount: cvData.workExperiences?.length || 0
+        });
+
+        // Build CV data structure with intelligent fallback
+        // Priority: tailoredPatch > original cvData > safe defaults
+        let finalSummary = '';
+        if (tailoredPatch.summary && typeof tailoredPatch.summary === 'string' && tailoredPatch.summary.trim().length > 0) {
+          finalSummary = tailoredPatch.summary.trim();
+          console.log('[Background] ✅ Using tailoredPatch summary (length:', finalSummary.length, ')');
+        } else if (cvData.user?.summary && cvData.user.summary.trim().length > 0) {
+          finalSummary = cvData.user.summary.trim();
+          console.log('[Background] ⚠️ tailoredPatch summary empty, using original summary (length:', finalSummary.length, ')');
+        } else {
+          finalSummary = 'Professional with relevant experience and skills.';
+          console.log('[Background] ⚠️ No summary available, using default fallback');
+        }
+
+        let finalSkills = [];
+        if (Array.isArray(tailoredPatch.skills) && tailoredPatch.skills.length > 0) {
+          finalSkills = tailoredPatch.skills.filter(s => s && typeof s === 'string' && s.trim().length > 0);
+          console.log('[Background] ✅ Using tailoredPatch skills (count:', finalSkills.length, ')');
+        } else if (Array.isArray(cvData.user?.skills) && cvData.user.skills.length > 0) {
+          finalSkills = [...cvData.user.skills];
+          console.log('[Background] ⚠️ tailoredPatch skills empty, using original skills (count:', finalSkills.length, ')');
+        } else {
+          finalSkills = ['Professional Skills'];
+          console.log('[Background] ⚠️ No skills available, using default fallback');
+        }
+
+        let finalHighlights = [];
+        if (Array.isArray(tailoredPatch.highlights) && tailoredPatch.highlights.length > 0) {
+          finalHighlights = tailoredPatch.highlights.filter(h => 
+            h && typeof h === 'object' && 
+            h.text && typeof h.text === 'string' && h.text.trim().length > 0
+          );
+          console.log('[Background] ✅ Using tailoredPatch highlights (count:', finalHighlights.length, ')');
+        } else {
+          // Create highlights from work experiences if available
+          if (cvData.workExperiences && cvData.workExperiences.length > 0) {
+            finalHighlights = cvData.workExperiences
+              .slice(0, 5)
+              .filter(exp => exp.description && exp.description.trim().length > 0)
+              .map((exp, idx) => ({
+                text: exp.description.substring(0, 150) + (exp.description.length > 150 ? '...' : ''),
+                source: 'experience',
+                index: idx
+              }));
+            console.log('[Background] ⚠️ tailoredPatch highlights empty, created from experiences (count:', finalHighlights.length, ')');
+          }
+        }
+        
+        // Convert highlights from List<Map> to List<String> for Flutter compatibility
+        const flatHighlights = finalHighlights.map(h => {
+          if (typeof h === 'object' && h !== null) {
+            return h.text || h.description || JSON.stringify(h);
+          }
+          return String(h || '');
+        }).filter(h => h.trim().length > 0);
+        
+        console.log('[Background] 🔄 Converted highlights to flat strings:', {
+          originalCount: finalHighlights.length,
+          flatCount: flatHighlights.length,
+          sample: flatHighlights[0]?.substring(0, 50) || 'N/A'
+        });
+
+        let finalExperiences = [];
+        if (Array.isArray(tailoredPatch.experiences) && tailoredPatch.experiences.length > 0) {
+          finalExperiences = tailoredPatch.experiences.filter(exp => 
+            exp && typeof exp === 'object' && 
+            typeof exp.index === 'number' &&
+            exp.description && typeof exp.description === 'string' && exp.description.trim().length > 0
+          );
+          console.log('[Background] ✅ Using tailoredPatch experiences (count:', finalExperiences.length, ')');
+        } else if (cvData.workExperiences && cvData.workExperiences.length > 0) {
+          finalExperiences = cvData.workExperiences.map((exp, idx) => ({
+            index: idx,
+            description: exp.description || `${exp.position || 'Position'} at ${exp.company || 'Company'}`
+          }));
+          console.log('[Background] ⚠️ tailoredPatch experiences empty, using original experiences (count:', finalExperiences.length, ')');
+        }
+
+        // Calculate match scores
+        const originalUserSkills = cvData.user?.skills || [];
+        const matchBefore = calculateMatchPercentage(originalUserSkills, jobData.skills);
+        const matchAfter = calculateMatchPercentage(finalSkills, jobData.skills);
+        
+        console.log('[Background] 📊 Calculated match scores:', {
+          matchBefore,
+          matchAfter,
+          originalSkillsCount: originalUserSkills.length,
+          tailoredSkillsCount: finalSkills.length,
+          jobSkillsCount: jobData.skills.length
+        });
+        
+        const cvDataWithReport = {
+          summary: finalSummary,
+          focus_summary: tailoredPatch.focus_summary || null,
+          skills: finalSkills,
+          highlights: flatHighlights, // Use flat strings instead of objects
+          experiences: finalExperiences,
+          matchBefore: matchBefore,
+          matchAfter: matchAfter,
           changes: [] // Can be populated if needed
         };
 
-        generatedContent.cv = cvDataWithReport;
-        console.log('[Background] ✅ Tailored CV generated:', {
-          hasSummary: !!cvDataWithReport.summary,
+        // Final validation: ensure critical fields are never empty
+        if (!cvDataWithReport.summary || cvDataWithReport.summary.trim().length === 0) {
+          console.error('[Background] ❌ CRITICAL: Summary is still empty after all fallbacks!');
+          cvDataWithReport.summary = 'Professional with relevant experience and skills.';
+        }
+        if (cvDataWithReport.skills.length === 0) {
+          console.error('[Background] ❌ CRITICAL: Skills array is still empty after all fallbacks!');
+          cvDataWithReport.skills = ['Professional Skills'];
+        }
+        
+        // Guardrail: Validate highlights and experiences before storing
+        if (cvDataWithReport.highlights.length === 0) {
+          console.warn('[Background] ⚠️ WARNING: Highlights array is empty - this may cause empty CV display');
+          console.warn('[Background] ⚠️ Original workExperiences count:', cvData.workExperiences?.length || 0);
+        }
+        if (cvDataWithReport.experiences.length === 0) {
+          console.warn('[Background] ⚠️ WARNING: Experiences array is empty - this may cause empty CV display');
+          console.warn('[Background] ⚠️ Original workExperiences count:', cvData.workExperiences?.length || 0);
+        }
+
+        console.log('[Background] 🔨 Built cvDataWithReport:', {
+          summary: cvDataWithReport.summary?.substring(0, 100) || 'EMPTY',
+          summaryLength: cvDataWithReport.summary?.length || 0,
+          focus_summary: cvDataWithReport.focus_summary,
           skillsCount: cvDataWithReport.skills?.length || 0,
-          highlightsCount: cvDataWithReport.highlights?.length || 0
+          skills: cvDataWithReport.skills,
+          highlightsCount: cvDataWithReport.highlights?.length || 0,
+          highlights: cvDataWithReport.highlights,
+          experiencesCount: cvDataWithReport.experiences?.length || 0,
+          experiences: cvDataWithReport.experiences
+        });
+        console.log('[Background] 🔨 Full cvDataWithReport JSON:', JSON.stringify(cvDataWithReport, null, 2));
+
+        // Final validation before storing
+        console.log('[Background] 🔍 Final validation before storing cvDataWithReport...');
+        if (!cvDataWithReport.summary || cvDataWithReport.summary.trim().length === 0) {
+          console.error('[Background] ❌ CRITICAL ERROR: cvDataWithReport.summary is empty!');
+          cvDataWithReport.summary = 'Professional with relevant experience and skills.';
+        }
+        if (!cvDataWithReport.skills || cvDataWithReport.skills.length === 0) {
+          console.error('[Background] ❌ CRITICAL ERROR: cvDataWithReport.skills is empty!');
+          cvDataWithReport.skills = ['Professional Skills'];
+        }
+        
+        generatedContent.cv = cvDataWithReport;
+        console.log('[Background] ✅ Tailored CV generated and stored in generatedContent.cv:', {
+          hasSummary: !!cvDataWithReport.summary,
+          summaryLength: cvDataWithReport.summary?.length || 0,
+          summaryPreview: cvDataWithReport.summary?.substring(0, 100) || 'EMPTY',
+          skillsCount: cvDataWithReport.skills?.length || 0,
+          skills: cvDataWithReport.skills,
+          highlightsCount: cvDataWithReport.highlights?.length || 0,
+          experiencesCount: cvDataWithReport.experiences?.length || 0,
+          generatedContentCvExists: !!generatedContent.cv,
+          generatedContentCvSummary: generatedContent.cv?.summary?.substring(0, 100) || 'N/A'
         });
 
         // Save CV to database
@@ -526,8 +766,8 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
             jobData.company,
             {
               tailoredCvData: cvDataWithReport,
-              matchBefore: 0,
-              matchAfter: 0,
+              matchBefore: matchBefore,
+              matchAfter: matchAfter,
               changes: []
             }
           );
@@ -544,9 +784,51 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
         console.error('[Background] ❌ Error generating CV:', error);
         console.error('[Background] ❌ CV generation error details:', {
           message: error.message,
-          stack: error.stack
+          stack: error.stack,
+          name: error.name
         });
-        // Continue with other content - error already handled in generator
+        
+        // Try to create a minimal CV from original data as last resort
+        try {
+          console.log('[Background] 🔄 Attempting to create minimal CV from original data...');
+          // Calculate match scores for fallback CV
+          const fallbackUserSkills = cvData.user?.skills || [];
+          const fallbackMatchBefore = calculateMatchPercentage(fallbackUserSkills, jobData.skills);
+          const fallbackMatchAfter = calculateMatchPercentage(fallbackUserSkills, jobData.skills); // Same as before since no tailoring
+          
+          // Convert highlights to flat strings
+          const fallbackHighlights = (cvData.workExperiences || [])
+            .slice(0, 5)
+            .map((exp, idx) => {
+              const text = exp.description || `${exp.position || 'Position'} at ${exp.company || 'Company'}`;
+              return text; // Return string directly
+            })
+            .filter(h => h.trim().length > 0);
+          
+          const minimalCV = {
+            summary: cvData.user?.summary || 'Professional with relevant experience and skills.',
+            focus_summary: null,
+            skills: cvData.user?.skills || ['Professional Skills'],
+            highlights: fallbackHighlights,
+            experiences: (cvData.workExperiences || []).map((exp, idx) => ({
+              index: idx,
+              description: exp.description || `${exp.position || 'Position'} at ${exp.company || 'Company'}`
+            })),
+            matchBefore: fallbackMatchBefore,
+            matchAfter: fallbackMatchAfter,
+            changes: []
+          };
+          
+          generatedContent.cv = minimalCV;
+          console.log('[Background] ✅ Created minimal CV from original data:', {
+            hasSummary: !!minimalCV.summary,
+            summaryLength: minimalCV.summary.length,
+            skillsCount: minimalCV.skills.length
+          });
+        } catch (fallbackError) {
+          console.error('[Background] ❌ Even fallback CV creation failed:', fallbackError);
+          // Continue with other content - CV generation failed completely
+        }
       }
     } else if (preferences.cv && !userHasSkills) {
       console.log('[Background] ⚠️ CV generation skipped - user has no skills');
@@ -598,6 +880,18 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
     if (generatedContent.coverLetter || generatedContent.cv || generatedContent.interviewQA) {
       try {
         console.log('[Background] 📨 Creating messages for generated content...');
+        console.log('[Background] 📨 Content to create messages for:', {
+          hasCoverLetter: !!generatedContent.coverLetter,
+          hasCV: !!generatedContent.cv,
+          hasInterviewQA: !!generatedContent.interviewQA,
+          cvDataSummary: generatedContent.cv?.summary?.substring(0, 100) || 'N/A',
+          cvDataSummaryLength: generatedContent.cv?.summary?.length || 0,
+          cvDataSkillsCount: generatedContent.cv?.skills?.length || 0,
+          cvDataHighlightsCount: generatedContent.cv?.highlights?.length || 0,
+          cvDataExperiencesCount: generatedContent.cv?.experiences?.length || 0
+        });
+        console.log('[Background] 📨 Full generatedContent.cv before passing:', JSON.stringify(generatedContent.cv, null, 2));
+        
         const contentMessages = await createCVCoverLetterInterviewQAMessages(
           chatThread.id,
           generatedContent.coverLetter,

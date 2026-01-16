@@ -387,6 +387,15 @@ export async function createJobAnalysisMessages(threadId, jobDescription, analys
       messages.push(missingSkillsMessage);
     } else {
       console.log('[API] 📝 Creating match_analysis message');
+      
+      // Transform improvedSkills from Edge Function format to required format
+      // Edge Function returns: Array<{skill: string, suggestion: string}>
+      // Required format: Array<{original: string, improved: string}>
+      const improvedSkills = (matchAnalysis.improvedSkills || []).map(item => ({
+        original: item.skill || item.original || '',
+        improved: item.suggestion || item.improved || ''
+      })).filter(item => item.original && item.improved); // Filter out empty items
+      
       const matchAnalysisMessage = await createChatMessage(
         threadId,
         'assistant',
@@ -396,7 +405,7 @@ export async function createJobAnalysisMessages(threadId, jobDescription, analys
           matchPercentage: matchAnalysis.matchPercentage || 0,
           matchingSkills: matchAnalysis.matchingSkills || [],
           suggestedSkills: matchAnalysis.suggestedSkills || [],
-          improvedSkills: matchAnalysis.improvedSkills || [],
+          improvedSkills: improvedSkills,
           projectedMatchPercentage: matchAnalysis.projectedMatchPercentage || 0,
           reasoning: matchAnalysis.reasoning || '',
           userSkills: userSkills || [],
@@ -407,6 +416,29 @@ export async function createJobAnalysisMessages(threadId, jobDescription, analys
         userId
       );
       messages.push(matchAnalysisMessage);
+      
+      // 5. Network Intro Message (after match_analysis)
+      const companyInfo = analysisResult.jobData?.companyInfo || {};
+      if (companyInfo.name || jobInfo.company) {
+        console.log('[API] 📝 Creating network_intro message');
+        const networkIntroMessage = await createChatMessage(
+          threadId,
+          'assistant',
+          'Here are some networking tips for this company:',
+          {
+            type: 'network_intro',
+            companyName: companyInfo.name || jobInfo.company || '',
+            companyDescription: companyInfo.description || '',
+            companyLinkedInUrl: companyInfo.linkedInUrl || '',
+            companyIndustry: companyInfo.industry || '',
+            companySize: companyInfo.companySize || '',
+            companyWebsiteUrl: companyInfo.websiteUrl || '',
+            credits_used: 0
+          },
+          userId
+        );
+        messages.push(networkIntroMessage);
+      }
     }
     
     console.log('[API] ✅ All job analysis messages created successfully:', messages.length, 'messages');
@@ -538,27 +570,101 @@ export async function createCVCoverLetterInterviewQAMessages(threadId, coverLett
     // 2. CV Message (if available)
     if (cvData) {
       console.log('[API] 📝 Creating cv message');
+      console.log('[API] 📝 Received cvData:', {
+        hasSummary: !!cvData.summary,
+        summaryLength: cvData.summary?.length || 0,
+        summaryPreview: cvData.summary?.substring(0, 100) || 'EMPTY',
+        hasFocusSummary: !!cvData.focus_summary,
+        focusSummary: cvData.focus_summary,
+        skillsCount: cvData.skills?.length || 0,
+        skills: cvData.skills || [],
+        highlightsCount: cvData.highlights?.length || 0,
+        highlights: cvData.highlights || [],
+        experiencesCount: cvData.experiences?.length || 0,
+        experiences: cvData.experiences || []
+      });
+      console.log('[API] 📝 Full cvData JSON:', JSON.stringify(cvData, null, 2));
+      
+      // Ensure experiences is in correct format (array of objects with index and description)
+      // Flatten to simple objects to avoid JSON parsing issues in Flutter
+      const experiences = (cvData.experiences || []).map(exp => {
+        // Ensure index is a number
+        const index = typeof exp.index === 'number' ? exp.index : (typeof exp.index === 'string' ? parseInt(exp.index, 10) || 0 : 0);
+        // Ensure description is a string
+        const description = String(exp.description || '');
+        return {
+          index: index,
+          description: description
+        };
+      }).filter(exp => exp.description.trim().length > 0); // Remove empty descriptions
+      
+      console.log('[API] 📝 Processed experiences:', {
+        count: experiences.length,
+        experiences: experiences
+      });
+      
+      // Ensure highlights are flat strings (Flutter expects List<String>)
+      const flatHighlights = (cvData.highlights || []).map(h => {
+        if (typeof h === 'string') return h;
+        if (typeof h === 'object' && h !== null) {
+          return h.text || h.description || JSON.stringify(h);
+        }
+        return String(h || '');
+      }).filter(h => h.trim().length > 0);
+      
+      // Ensure skills are strings
+      const flatSkills = (cvData.skills || []).map(s => String(s || '')).filter(s => s.trim().length > 0);
+      
+      // Ensure changes are strings
+      const flatChanges = (cvData.changes || []).map(c => String(c || '')).filter(c => c.trim().length > 0);
+      
+      const cvMetadata = {
+        type: 'cv',
+        summary: String(cvData.summary || ''),
+        focus_summary: cvData.focus_summary ? String(cvData.focus_summary) : null,
+        matchBefore: typeof cvData.matchBefore === 'number' ? cvData.matchBefore : (typeof cvData.matchBefore === 'string' ? parseInt(cvData.matchBefore, 10) || 0 : 0),
+        matchAfter: typeof cvData.matchAfter === 'number' ? cvData.matchAfter : (typeof cvData.matchAfter === 'string' ? parseInt(cvData.matchAfter, 10) || 0 : 0),
+        highlights: flatHighlights, // Flat strings for Flutter compatibility
+        skills: flatSkills, // Ensure all are strings
+        experiences: experiences, // Simple objects with index and description
+        changes: flatChanges, // Flat strings
+        isGenerating: false,
+        credits_used: 0
+      };
+      
+      console.log('[API] 📝 CV metadata to save:', {
+        type: cvMetadata.type,
+        hasSummary: !!cvMetadata.summary,
+        summaryLength: cvMetadata.summary.length,
+        summaryPreview: cvMetadata.summary.substring(0, 100),
+        hasFocusSummary: !!cvMetadata.focus_summary,
+        skillsCount: cvMetadata.skills.length,
+        highlightsCount: cvMetadata.highlights.length,
+        experiencesCount: cvMetadata.experiences.length
+      });
+      console.log('[API] 📝 Full CV metadata JSON:', JSON.stringify(cvMetadata, null, 2));
+      
       const cvMessage = await createChatMessage(
         threadId,
         'assistant',
         cvData.summary || 'I\'ve tailored your CV for this position:',
-        {
-          type: 'cv',
-          summary: cvData.summary || '',
-          matchBefore: cvData.matchBefore || 0,
-          matchAfter: cvData.matchAfter || 0,
-          highlights: cvData.highlights || [],
-          skills: cvData.skills || [],
-          changes: cvData.changes || [],
-          isGenerating: false,
-          credits_used: 0
-        },
+        cvMetadata,
         userId
       );
+      
+      console.log('[API] ✅ CV message created:', {
+        messageId: cvMessage.id,
+        hasMetadata: !!cvMessage.metadata,
+        metadataType: cvMessage.metadata?.type,
+        metadataSummaryLength: cvMessage.metadata?.summary?.length || 0
+      });
+      
       messages.push(cvMessage);
       
       // Small delay to ensure sequential display
       await new Promise(resolve => setTimeout(resolve, 500));
+    } else {
+      console.log('[API] ⚠️ cvData is null or undefined, skipping CV message creation');
     }
 
     // 3. Interview QA Messages (if available)
