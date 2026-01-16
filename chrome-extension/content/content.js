@@ -686,7 +686,7 @@ function updateButtonState(status, message = '') {
       button.disabled = true;
       if (logoImg) logoImg.style.display = 'none';
       icon.textContent = '⏳';
-      text.textContent = 'Sending...';
+      text.textContent = message || 'Sending...';
       break;
       
     case 'success':
@@ -760,6 +760,22 @@ async function checkJobStatus() {
     }
     
     const jobUrl = constructJobUrl(jobId);
+
+    // If this job is currently queued/running in the background, show loading immediately.
+    try {
+      const processingResponse = await chrome.runtime.sendMessage({
+        action: 'getJobProcessingStatus',
+        userId: authResponse.user.id,
+        jobUrl
+      });
+      if (processingResponse?.success && (processingResponse.status === 'queued' || processingResponse.status === 'running')) {
+        updateButtonState('loading', processingResponse.status === 'queued' ? 'Queued...' : 'Processing...');
+        return;
+      }
+    } catch (e) {
+      // ignore, fall back to DB check
+    }
+
     const checkResponse = await chrome.runtime.sendMessage({
       action: 'checkJobExists',
       userId: authResponse.user.id,
@@ -867,6 +883,21 @@ async function handleButtonClick(event) {
       updateButtonState('alreadySent');
       return;
     }
+
+    // If already queued/running in background, avoid sending a duplicate request.
+    try {
+      const processingResponse = await chrome.runtime.sendMessage({
+        action: 'getJobProcessingStatus',
+        userId,
+        jobUrl
+      });
+      if (processingResponse?.success && (processingResponse.status === 'queued' || processingResponse.status === 'running')) {
+        updateButtonState('loading', processingResponse.status === 'queued' ? 'Queued...' : 'Processing...');
+        return;
+      }
+    } catch (e) {
+      // ignore, continue to queue request
+    }
     
     // Analyze and save job - include extracted DOM data as fallback
     const analyzeMessage = {
@@ -902,15 +933,16 @@ async function handleButtonClick(event) {
     console.log('[Content Script] 📦 Complete Message Object (JSON):');
     console.log(JSON.stringify(analyzeMessage, null, 2));
     console.log('='.repeat(80));
+    updateButtonState('loading', 'Queued...');
     const analyzeResponse = await chrome.runtime.sendMessage(analyzeMessage);
-    console.log('[Content Script] 📥 Received analyzeJob response:', analyzeResponse);
-    
-    if (analyzeResponse.success) {
-      console.log('[Content Script] ✅ Job analyzed and saved successfully');
-      updateButtonState('success');
+    console.log('[Content Script] 📥 Received analyzeJob queue response:', analyzeResponse);
+
+    if (analyzeResponse?.success && analyzeResponse.queued) {
+      // Background will continue processing even if the user navigates away.
+      updateButtonState('loading', analyzeResponse.status === 'running' ? 'Processing...' : 'Queued...');
     } else {
-      console.log('[Content Script] ❌ Job analysis failed:', analyzeResponse.error);
-      updateButtonState('error', analyzeResponse.error || 'Failed to analyze job');
+      console.log('[Content Script] ❌ Job enqueue failed:', analyzeResponse?.error);
+      updateButtonState('error', analyzeResponse?.error || 'Failed to start job');
     }
   } catch (error) {
     console.error('[Content Script] ❌ Error analyzing job:', error);
@@ -989,6 +1021,27 @@ function injectButtonIntoContainer(container) {
  * Initialize content script
  */
 function init() {
+  // Listen for background job status updates (optional; DB check is still the source of truth)
+  chrome.runtime.onMessage.addListener((message) => {
+    if (!message || message.action !== 'jobStatusChanged') return;
+    if (!buttonState.element) return;
+
+    const jobId = extractJobId();
+    if (!jobId) return;
+    const currentJobUrl = constructJobUrl(jobId);
+    if (message.jobUrl !== currentJobUrl) return;
+
+    if (message.status === 'queued') {
+      updateButtonState('loading', 'Queued...');
+    } else if (message.status === 'running') {
+      updateButtonState('loading', 'Processing...');
+    } else if (message.status === 'success') {
+      updateButtonState('success');
+    } else if (message.status === 'error') {
+      updateButtonState('error', message.error || 'Failed to process job');
+    }
+  });
+
   // Inject button when page loads
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', injectButton);

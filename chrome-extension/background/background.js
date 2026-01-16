@@ -29,6 +29,184 @@ console.log('[Background] 🚀 Service Worker initialized successfully');
 console.log('[Background] 📦 All modules imported successfully');
 
 /**
+ * In-memory job queue to ensure long-running analysis continues even if the user navigates away.
+ * Notes:
+ * - We keep only queued/running jobs here. Completed jobs are removed (DB check handles "already sent").
+ * - We process sequentially to avoid parallel credit deductions / API pressure.
+ */
+const pendingJobs = new Map(); // jobKey -> { requestId, userId, jobUrl, extractedJobData, status, enqueuedAt }
+const jobQueue = []; // array of jobKey
+let isProcessingQueue = false;
+
+function makeJobKey(userId, jobUrl) {
+  return `${userId}::${jobUrl}`;
+}
+
+function newRequestId() {
+  try {
+    return globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  } catch {
+    return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  }
+}
+
+function safeRuntimeMessage(message) {
+  try {
+    chrome.runtime.sendMessage(message).catch(() => {
+      // No listeners (popup/content may be closed), ignore.
+    });
+  } catch {
+    // Ignore
+  }
+}
+
+function setJobProgress(jobKey, patch) {
+  const job = pendingJobs.get(jobKey);
+  if (!job) return;
+  const next = {
+    ...job,
+    ...patch,
+    updatedAt: Date.now()
+  };
+  pendingJobs.set(jobKey, next);
+
+  safeRuntimeMessage({
+    action: 'jobStatusChanged',
+    jobUrl: next.jobUrl,
+    userId: next.userId,
+    requestId: next.requestId,
+    status: next.status,
+    currentStep: next.currentStep || null,
+    stepDetail: next.stepDetail || null,
+    error: next.error || null
+  });
+}
+
+async function updatePendingJobsBadge() {
+  const count = Array.from(pendingJobs.values()).filter(j => j.status === 'queued' || j.status === 'running').length;
+  try {
+    await chrome.action.setBadgeBackgroundColor({ color: '#2563EB' });
+    await chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
+  } catch (e) {
+    console.warn('[Background] ⚠️ Failed updating badge:', e);
+  }
+}
+
+function showCompletionNotification({ requestId, jobTitle, company, jobUrl, success, error }) {
+  try {
+    const title = success ? 'SwiftCareer: Job processed' : 'SwiftCareer: Job failed';
+    const context = [jobTitle, company].filter(Boolean).join(' • ') || jobUrl || 'LinkedIn job';
+    const message = success ? `Completed: ${context}` : `Failed: ${context}${error ? `\n${error}` : ''}`;
+
+    chrome.notifications.create(
+      `swiftcareer_job_${requestId}`,
+      {
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title,
+        message
+      },
+      (createdId) => {
+        if (chrome.runtime.lastError) {
+          console.warn('[Background] ⚠️ Notification error:', chrome.runtime.lastError.message);
+        } else {
+          console.log('[Background] 🔔 Notification created:', createdId);
+        }
+      }
+    );
+  } catch (e) {
+    console.warn('[Background] ⚠️ Failed showing notification:', e);
+  }
+}
+
+// Ensure badge is always in sync on service worker (re)start.
+updatePendingJobsBadge().catch(() => {});
+
+function scheduleJobCleanup(jobKey, delayMs = 2 * 60 * 1000) {
+  try {
+    setTimeout(() => {
+      const job = pendingJobs.get(jobKey);
+      if (!job) return;
+      // Only cleanup completed/failed jobs; keep queued/running.
+      if (job.status === 'queued' || job.status === 'running') return;
+      pendingJobs.delete(jobKey);
+      updatePendingJobsBadge().catch(() => {});
+    }, delayMs);
+  } catch {
+    // ignore
+  }
+}
+
+async function processJobQueue() {
+  if (isProcessingQueue) return;
+  isProcessingQueue = true;
+
+  try {
+    while (jobQueue.length > 0) {
+      const jobKey = jobQueue.shift();
+      const job = pendingJobs.get(jobKey);
+      if (!job || job.status !== 'queued') continue;
+
+      setJobProgress(jobKey, {
+        status: 'running',
+        currentStep: 'starting',
+        stepDetail: null,
+        error: null
+      });
+      await updatePendingJobsBadge();
+
+      try {
+        const result = await analyzeJobInternal({
+          jobUrl: job.jobUrl,
+          userId: job.userId,
+          extractedJobData: job.extractedJobData,
+          jobKey,
+          requestId: job.requestId
+        });
+
+        const jobInfo = result?.analysis?.jobData?.jobInfo || {};
+        showCompletionNotification({
+          requestId: job.requestId,
+          jobTitle: jobInfo.title,
+          company: jobInfo.company,
+          jobUrl: job.jobUrl,
+          success: true
+        });
+
+        setJobProgress(jobKey, {
+          status: 'success',
+          currentStep: 'completed',
+          stepDetail: null
+        });
+      } catch (e) {
+        const errorMessage = e?.message || String(e);
+        showCompletionNotification({
+          requestId: job.requestId,
+          jobTitle: job.extractedJobData?.title,
+          company: job.extractedJobData?.company,
+          jobUrl: job.jobUrl,
+          success: false,
+          error: errorMessage
+        });
+
+        setJobProgress(jobKey, {
+          status: 'error',
+          currentStep: 'failed',
+          stepDetail: null,
+          error: errorMessage
+        });
+      } finally {
+        // Badge counts only queued/running, so success/error will automatically reduce the count.
+        await updatePendingJobsBadge();
+        scheduleJobCleanup(jobKey);
+      }
+    }
+  } finally {
+    isProcessingQueue = false;
+  }
+}
+
+/**
  * Build a complete job description text from extracted DOM data
  * This will be sent to Edge Function as text input (not URL)
  * Prioritizes "About the job" section if available
@@ -76,6 +254,208 @@ function buildJobDescriptionFromExtractedData(extractedData) {
 // Log service worker startup
 console.log('[Background] 🚀 Service Worker started');
 
+/**
+ * Runs the full job analysis + saving workflow and returns its results.
+ * This is extracted so it can be executed from the background queue.
+ */
+async function analyzeJobInternal(request) {
+  console.log('[Background] 🚀 Starting job analysis (internal):', { jobUrl: request.jobUrl, userId: request.userId });
+  if (!request.jobUrl || !request.userId) {
+    throw new Error('Missing jobUrl or userId');
+  }
+
+  const reportStep = (currentStep, stepDetail = null) => {
+    if (!request.jobKey) return;
+    setJobProgress(request.jobKey, {
+      status: 'running',
+      currentStep,
+      stepDetail
+    });
+  };
+
+  // Prefer real job text extracted from the DOM, and only fall back to URL.
+  const domJobDescription = request.extractedJobData ? buildJobDescriptionFromExtractedData(request.extractedJobData) : '';
+  const jobInputForAnalysis =
+    domJobDescription && domJobDescription.trim().length > 0 ? domJobDescription : request.jobUrl;
+
+  // Get user profile and skills
+  let userSkills = [];
+  let userProfile = {};
+
+  try {
+    reportStep('fetching_profile');
+    console.log('[Background] 👤 Fetching user profile for userId:', request.userId);
+    const profile = await getUserProfile(request.userId);
+    userSkills = profile.skills || [];
+    userProfile = {
+      fullName: profile.full_name,
+      email: profile.email,
+      headline: profile.headline,
+      summary: profile.summary,
+      location: profile.location,
+      linkedin: profile.linkedin,
+      phone: profile.phone,
+      website: profile.website,
+      skills: userSkills
+    };
+    console.log('[Background] ✅ User profile fetched:', {
+      fullName: userProfile.fullName,
+      skillsCount: userSkills.length,
+      hasHeadline: !!userProfile.headline,
+      hasSummary: !!userProfile.summary
+    });
+  } catch (error) {
+    console.warn('[Background] ⚠️ Could not fetch user profile:', error);
+  }
+
+  let analysisResult;
+  let savedJob;
+  let chatThread;
+  let chatMessages;
+  let jobDescription;
+
+  try {
+    reportStep('analyzing_job');
+    console.log('[Background] 🌐 Calling job analysis API with input:', {
+      kind: jobInputForAnalysis === request.jobUrl ? 'url' : 'dom_text',
+      length: jobInputForAnalysis.length
+    });
+
+    analysisResult = await callJobAnalysis(jobInputForAnalysis, request.userId, userSkills, userProfile);
+
+    console.log('[Background] ✅ Job analysis API response received:', {
+      hasJobData: !!analysisResult.jobData,
+      hasMatchAnalysis: !!analysisResult.matchAnalysis,
+      jobSkillsCount: analysisResult.jobSkills?.length || 0,
+      isLinkedInUrl: analysisResult.isLinkedInUrl,
+      creditsUsed: analysisResult.creditsUsed
+    });
+
+    // Notify popup to refresh credits if they were deducted
+    if (analysisResult.creditsUsed && analysisResult.creditsUsed > 0) {
+      safeRuntimeMessage({ action: 'creditsUpdated' });
+    }
+
+    // Build job description for user message
+    const jobInfo = analysisResult.jobData?.jobInfo || {};
+    jobDescription = request.extractedJobData
+      ? buildJobDescriptionFromExtractedData(request.extractedJobData)
+      : (jobInfo.description || request.jobUrl);
+
+    // 1. Create or update chat thread
+    reportStep('creating_chat');
+    console.log('[Background] 💬 Creating/updating chat thread...');
+    try {
+      chatThread = await createOrUpdateChatThread(
+        request.userId,
+        request.jobUrl,
+        jobInfo.title,
+        jobInfo.company
+      );
+      console.log('[Background] ✅ Chat thread created/updated:', chatThread.id);
+
+      // 2. Create all chat messages
+      console.log('[Background] 📨 Creating chat messages...');
+      chatMessages = await createJobAnalysisMessages(
+        chatThread.id,
+        jobDescription,
+        analysisResult,
+        userSkills,
+        request.jobUrl,
+        request.userId
+      );
+      console.log('[Background] ✅ Chat messages created:', chatMessages.length, 'messages');
+    } catch (chatError) {
+      console.error('[Background] ⚠️ Error creating chat thread/messages:', chatError);
+      // Continue even if chat creation fails - we still want to save the job
+    }
+
+    // 3. Save to database
+    console.log('[Background] 💾 Saving job to database...');
+    savedJob = await saveJobToDatabase({ ...analysisResult, jobUrl: request.jobUrl }, request.userId);
+    console.log('[Background] ✅ Job saved to database:', savedJob);
+  } catch (error) {
+    console.error('[Background] ❌ Apify/API call failed:', error);
+
+    // If API fails and we have extracted DOM data, use it as fallback
+    if (request.extractedJobData && Object.keys(request.extractedJobData).length > 0) {
+      console.log('[Background] 🔄 API failed, using DOM extracted data as fallback');
+
+      jobDescription = buildJobDescriptionFromExtractedData(request.extractedJobData);
+      console.log('[Background] 📝 Built job description from DOM (length:', jobDescription.length, 'chars)');
+
+      if (jobDescription.trim().length > 0) {
+        reportStep('analyzing_job', 'fallback_dom_text');
+        console.log('[Background] 🌐 Calling job analysis API with text description...');
+        analysisResult = await callJobAnalysis(jobDescription, request.userId, userSkills, userProfile);
+
+        const jobInfo = analysisResult.jobData?.jobInfo || {};
+
+        console.log('[Background] 💬 Creating/updating chat thread (fallback)...');
+        try {
+          reportStep('creating_chat', 'fallback');
+          chatThread = await createOrUpdateChatThread(
+            request.userId,
+            request.jobUrl,
+            jobInfo.title,
+            jobInfo.company
+          );
+          console.log('[Background] ✅ Chat thread created/updated (fallback):', chatThread.id);
+
+          console.log('[Background] 📨 Creating chat messages (fallback)...');
+          chatMessages = await createJobAnalysisMessages(
+            chatThread.id,
+            jobDescription,
+            analysisResult,
+            userSkills,
+            request.jobUrl,
+            request.userId
+          );
+          console.log('[Background] ✅ Chat messages created (fallback):', chatMessages.length, 'messages');
+        } catch (chatError) {
+          console.error('[Background] ⚠️ Error creating chat thread/messages (fallback):', chatError);
+        }
+
+        console.log('[Background] 💾 Saving job to database (fallback)...');
+        savedJob = await saveJobToDatabase({ ...analysisResult, jobUrl: request.jobUrl }, request.userId);
+        console.log('[Background] ✅ Job saved to database (fallback):', savedJob);
+      } else {
+        console.error('[Background] ❌ Job description from DOM is empty');
+        throw new Error('Failed to extract job data from DOM and analysis failed');
+      }
+    } else {
+      console.error('[Background] ❌ No fallback data available');
+      throw error;
+    }
+  }
+
+  console.log('[Background] ✅ Job analysis completed successfully');
+
+  // Generate CV, Cover Letter, and Interview QA if enabled (non-fatal)
+  let generatedContent = null;
+  try {
+    reportStep('generating_content');
+    generatedContent = await generateContentAfterJobAnalysis(
+      request.userId,
+      chatThread,
+      analysisResult,
+      userProfile,
+      userSkills,
+      reportStep
+    );
+  } catch (genError) {
+    console.error('[Background] ⚠️ Error generating content (non-fatal):', genError);
+  }
+
+  return {
+    analysis: analysisResult,
+    savedJob,
+    chatThread,
+    chatMessages,
+    generatedContent
+  };
+}
+
 // Listen for messages from content script and popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   try {
@@ -112,256 +492,117 @@ async function handleMessage(request, sender, sendResponse) {
         sendResponse({ success: true, exists: !!existingJob, job: existingJob });
         break;
 
+      case 'getJobProcessingStatus': {
+        if (!request.userId || !request.jobUrl) {
+          sendResponse({ success: false, error: 'Missing userId or jobUrl' });
+          return;
+        }
+        const jobKey = makeJobKey(request.userId, request.jobUrl);
+        const job = pendingJobs.get(jobKey);
+        sendResponse({
+          success: true,
+          status: job?.status || 'none',
+          requestId: job?.requestId || null,
+          currentStep: job?.currentStep || null,
+          stepDetail: job?.stepDetail || null,
+          error: job?.error || null
+        });
+        break;
+      }
+
+      case 'getPendingJobs': {
+        if (!request.userId) {
+          sendResponse({ success: false, error: 'Missing userId' });
+          return;
+        }
+
+        const jobs = Array.from(pendingJobs.values())
+          .filter(j => j.userId === request.userId)
+          .map(j => {
+            const jobKey = makeJobKey(j.userId, j.jobUrl);
+            const queuePosition = j.status === 'queued' ? (jobQueue.indexOf(jobKey) + 1) : null;
+            return {
+              requestId: j.requestId,
+              jobUrl: j.jobUrl,
+              status: j.status,
+              currentStep: j.currentStep || null,
+              stepDetail: j.stepDetail || null,
+              title: j.title || j.extractedJobData?.title || null,
+              company: j.company || j.extractedJobData?.company || null,
+              enqueuedAt: j.enqueuedAt || null,
+              updatedAt: j.updatedAt || null,
+              queuePosition,
+              error: j.error || null
+            };
+          })
+          .sort((a, b) => {
+            const rank = (s) => (s === 'running' ? 0 : s === 'queued' ? 1 : 2);
+            const r = rank(a.status) - rank(b.status);
+            if (r !== 0) return r;
+            const aq = a.queuePosition ?? 9999;
+            const bq = b.queuePosition ?? 9999;
+            if (aq !== bq) return aq - bq;
+            return (a.enqueuedAt ?? 0) - (b.enqueuedAt ?? 0);
+          });
+
+        sendResponse({ success: true, jobs });
+        break;
+      }
+
       case 'analyzeJob':
-        console.log('[Background] 🚀 Starting job analysis:', { jobUrl: request.jobUrl, userId: request.userId });
+        console.log('[Background] 📥 Queue analyzeJob request:', { jobUrl: request.jobUrl, userId: request.userId });
         if (!request.jobUrl || !request.userId) {
-          console.log('[Background] ❌ Missing jobUrl or userId');
           sendResponse({ success: false, error: 'Missing jobUrl or userId' });
           return;
         }
 
-        // Prefer real job text extracted from the DOM (Flutter-equivalent "job description"),
-        // and only fall back to URL if DOM extraction is missing/empty.
-        const domJobDescription = request.extractedJobData
-          ? buildJobDescriptionFromExtractedData(request.extractedJobData)
-          : '';
-        const jobInputForAnalysis =
-          domJobDescription && domJobDescription.trim().length > 0
-            ? domJobDescription
-            : request.jobUrl;
+        {
+          const jobKey = makeJobKey(request.userId, request.jobUrl);
+          const existing = pendingJobs.get(jobKey);
+          if (existing) {
+            sendResponse({
+              success: true,
+              queued: true,
+              alreadyQueued: true,
+              requestId: existing.requestId,
+              status: existing.status
+            });
+            break;
+          }
 
-        // Get user profile and skills
-        let userSkills = [];
-        let userProfile = {};
-        
-        try {
-          console.log('[Background] 👤 Fetching user profile for userId:', request.userId);
-          const profile = await getUserProfile(request.userId);
-          userSkills = profile.skills || [];
-          userProfile = {
-            fullName: profile.full_name,
-            email: profile.email,
-            headline: profile.headline,
-            summary: profile.summary,
-            location: profile.location,
-            linkedin: profile.linkedin,
-            phone: profile.phone,
-            website: profile.website,
-            skills: userSkills
-          };
-          console.log('[Background] ✅ User profile fetched:', {
-            fullName: userProfile.fullName,
-            skillsCount: userSkills.length,
-            hasHeadline: !!userProfile.headline,
-            hasSummary: !!userProfile.summary
+          const requestId = newRequestId();
+          pendingJobs.set(jobKey, {
+            requestId,
+            userId: request.userId,
+            jobUrl: request.jobUrl,
+            extractedJobData: request.extractedJobData || null,
+            status: 'queued',
+            currentStep: 'queued',
+            stepDetail: null,
+            title: request.extractedJobData?.title || null,
+            company: request.extractedJobData?.company || null,
+            error: null,
+            enqueuedAt: Date.now(),
+            updatedAt: Date.now()
           });
-        } catch (error) {
-          console.warn('[Background] ⚠️ Could not fetch user profile:', error);
-        }
+          jobQueue.push(jobKey);
 
-        let analysisResult;
-        let savedJob;
-        let chatThread;
-        let chatMessages;
-        let jobDescription;
-
-        try {
-          console.log('[Background] 🌐 Calling job analysis API with input:', {
-            kind: jobInputForAnalysis === request.jobUrl ? 'url' : 'dom_text',
-            length: jobInputForAnalysis.length
-          });
-          console.log('[Background] 📤 API Request data:', {
+          await updatePendingJobsBadge();
+          safeRuntimeMessage({
+            action: 'jobStatusChanged',
             jobUrl: request.jobUrl,
             userId: request.userId,
-            userSkillsCount: userSkills.length,
-            hasUserProfile: Object.keys(userProfile).length > 0
-          });
-          
-          analysisResult = await callJobAnalysis(
-            jobInputForAnalysis,
-            request.userId,
-            userSkills,
-            userProfile
-          );
-
-          console.log('[Background] ✅ Job analysis API response received:', {
-            hasJobData: !!analysisResult.jobData,
-            hasMatchAnalysis: !!analysisResult.matchAnalysis,
-            jobSkillsCount: analysisResult.jobSkills?.length || 0,
-            isLinkedInUrl: analysisResult.isLinkedInUrl,
-            creditsUsed: analysisResult.creditsUsed
+            requestId,
+            status: 'queued',
+            currentStep: 'queued'
           });
 
-          // Notify popup to refresh credits if they were deducted
-          if (analysisResult.creditsUsed && analysisResult.creditsUsed > 0) {
-            try {
-              chrome.runtime.sendMessage({ action: 'creditsUpdated' }).catch(() => {
-                // Popup might not be open, ignore error
-              });
-            } catch (e) {
-              // Ignore if no listeners
-            }
-          }
+          // Kick off processing (fire-and-forget).
+          processJobQueue().catch(err => console.error('[Background] ❌ Queue processing crashed:', err));
 
-          // Build job description for user message
-          const jobInfo = analysisResult.jobData?.jobInfo || {};
-          jobDescription = request.extractedJobData 
-            ? buildJobDescriptionFromExtractedData(request.extractedJobData)
-            : (jobInfo.description || request.jobUrl);
-
-          // 1. Create or update chat thread
-          console.log('[Background] 💬 Creating/updating chat thread...');
-          try {
-            chatThread = await createOrUpdateChatThread(
-              request.userId,
-              request.jobUrl,
-              jobInfo.title,
-              jobInfo.company
-            );
-            console.log('[Background] ✅ Chat thread created/updated:', chatThread.id);
-
-            // 2. Create all chat messages
-            console.log('[Background] 📨 Creating chat messages...');
-            chatMessages = await createJobAnalysisMessages(
-              chatThread.id,
-              jobDescription,
-              analysisResult,
-              userSkills,
-              request.jobUrl,
-              request.userId
-            );
-            console.log('[Background] ✅ Chat messages created:', chatMessages.length, 'messages');
-          } catch (chatError) {
-            console.error('[Background] ⚠️ Error creating chat thread/messages:', chatError);
-            // Continue even if chat creation fails - we still want to save the job
-          }
-
-          // 3. Save to database
-          console.log('[Background] 💾 Saving job to database...');
-          savedJob = await saveJobToDatabase(
-            { ...analysisResult, jobUrl: request.jobUrl },
-            request.userId
-          );
-          console.log('[Background] ✅ Job saved to database:', savedJob);
-        } catch (error) {
-          console.error('[Background] ❌ Apify/API call failed:', error);
-          // If Apify fails and we have extracted DOM data, use it as fallback
-          if (request.extractedJobData && Object.keys(request.extractedJobData).length > 0) {
-            console.log('[Background] 🔄 Apify failed, using DOM extracted data as fallback');
-            console.log('[Background] 📄 Extracted DOM data:', {
-              title: request.extractedJobData.title,
-              company: request.extractedJobData.company,
-              location: request.extractedJobData.location,
-              descriptionLength: request.extractedJobData.description?.length || 0,
-              aboutTheJobLength: request.extractedJobData.aboutTheJob?.length || 0,
-              employmentType: request.extractedJobData.employmentType,
-              experienceLevel: request.extractedJobData.experienceLevel
-            });
-            
-            // Build job description from extracted DOM data
-            jobDescription = buildJobDescriptionFromExtractedData(request.extractedJobData);
-            console.log('[Background] 📝 Built job description from DOM (length:', jobDescription.length, 'chars)');
-            
-            if (jobDescription.trim().length > 0) {
-              // Send as text description instead of URL
-              // Edge Function will treat it as text and use parseJobDescription
-              console.log('[Background] 🌐 Calling job analysis API with text description...');
-              analysisResult = await callJobAnalysis(
-                jobDescription, // Send text instead of URL
-                request.userId,
-                userSkills,
-                userProfile
-              );
-
-              console.log('[Background] ✅ Job analysis API response (fallback):', {
-                hasJobData: !!analysisResult.jobData,
-                hasMatchAnalysis: !!analysisResult.matchAnalysis
-              });
-
-              // Build job description for user message (use the one we built)
-              const jobInfo = analysisResult.jobData?.jobInfo || {};
-
-              // 1. Create or update chat thread
-              console.log('[Background] 💬 Creating/updating chat thread (fallback)...');
-              try {
-                chatThread = await createOrUpdateChatThread(
-                  request.userId,
-                  request.jobUrl,
-                  jobInfo.title,
-                  jobInfo.company
-                );
-                console.log('[Background] ✅ Chat thread created/updated (fallback):', chatThread.id);
-
-                // 2. Create all chat messages
-                console.log('[Background] 📨 Creating chat messages (fallback)...');
-                chatMessages = await createJobAnalysisMessages(
-                  chatThread.id,
-                  jobDescription,
-                  analysisResult,
-                  userSkills,
-                  request.jobUrl,
-                  request.userId
-                );
-                console.log('[Background] ✅ Chat messages created (fallback):', chatMessages.length, 'messages');
-              } catch (chatError) {
-                console.error('[Background] ⚠️ Error creating chat thread/messages (fallback):', chatError);
-                // Continue even if chat creation fails - we still want to save the job
-              }
-
-              // 3. Save to database with original jobUrl
-              console.log('[Background] 💾 Saving job to database (fallback)...');
-              savedJob = await saveJobToDatabase(
-                { ...analysisResult, jobUrl: request.jobUrl },
-                request.userId
-              );
-              console.log('[Background] ✅ Job saved to database (fallback):', savedJob);
-            } else {
-              console.error('[Background] ❌ Job description from DOM is empty');
-              throw new Error('Failed to extract job data from DOM and Apify failed');
-            }
-          } else {
-            console.error('[Background] ❌ No fallback data available');
-            // No fallback data available, re-throw the error
-            throw error;
-          }
+          sendResponse({ success: true, queued: true, requestId, status: 'queued' });
+          break;
         }
-
-        console.log('[Background] ✅ Job analysis completed successfully');
-
-        // Generate CV, Cover Letter, and Interview QA if enabled
-        let generatedContent = null;
-        let generationErrors = [];
-        try {
-          generatedContent = await generateContentAfterJobAnalysis(
-            request.userId,
-            chatThread,
-            analysisResult,
-            userProfile,
-            userSkills
-          );
-          console.log('[Background] ✅ Content generation completed:', {
-            hasCoverLetter: !!generatedContent?.coverLetter,
-            hasCV: !!generatedContent?.cv,
-            hasInterviewQA: !!generatedContent?.interviewQA,
-            messagesCount: generatedContent?.messages?.length || 0
-          });
-        } catch (genError) {
-          console.error('[Background] ⚠️ Error generating content (non-fatal):', genError);
-          generationErrors.push(genError.message || 'Unknown error');
-          // Don't fail the whole request if content generation fails
-          // Log error but continue
-          console.warn('[Background] ⚠️ Continuing despite content generation errors');
-        }
-
-        sendResponse({
-          success: true,
-          analysis: analysisResult,
-          savedJob,
-          chatThread,
-          chatMessages,
-          generatedContent
-        });
-        break;
 
       case 'getUser':
         console.log('[Background] 👤 Getting current user...');
@@ -642,7 +883,7 @@ async function calculateCompositeMatch({ cvData, jobSkills, jobDescription }) {
 /**
  * Generate CV, Cover Letter, and Interview QA after job analysis
  */
-async function generateContentAfterJobAnalysis(userId, chatThread, analysisResult, userProfile, userSkills) {
+async function generateContentAfterJobAnalysis(userId, chatThread, analysisResult, userProfile, userSkills, progress) {
   console.log('[Background] 🚀 Starting content generation after job analysis');
 
   // Check user preferences
@@ -676,6 +917,7 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
     // Generate Cover Letter if enabled
     if (preferences.cover_letter) {
       try {
+        if (typeof progress === 'function') progress('generating_cover_letter');
         console.log('[Background] 🔎 Validation (Cover Letter):', {
           profileHasName: !!(userProfile?.fullName),
           profileSkillsCount: Array.isArray(userProfile?.skills) ? userProfile.skills.length : 0,
@@ -741,6 +983,7 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
     // Generate CV if enabled and user has skills
     if (preferences.cv && userHasSkills) {
       try {
+        if (typeof progress === 'function') progress('generating_cv');
         console.log('[Background] 🔎 Validation (Tailored CV):', {
           jobTitle: jobData.title,
           company: jobData.company,
@@ -1167,6 +1410,7 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
     // Generate Interview QA if enabled and user has skills
     if (preferences.interview_qa && userHasSkills) {
       try {
+        if (typeof progress === 'function') progress('generating_interview_qa');
         console.log('[Background] 🔎 Validation (Interview QA):', {
           profileSkillsCount: Array.isArray(userProfile?.skills) ? userProfile.skills.length : 0,
           jobRequirementsCount: Array.isArray(jobData.skills) ? jobData.skills.length : 0,
@@ -1277,6 +1521,7 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
 
     // Generate Portfolio LAST (so the message appears at the end, like Flutter)
     try {
+      if (typeof progress === 'function') progress('generating_portfolio');
       const createPortfolioSetting = await Storage.get('createPortfolio');
       const createPortfolioEnabled =
         typeof createPortfolioSetting === 'boolean' ? createPortfolioSetting : true;

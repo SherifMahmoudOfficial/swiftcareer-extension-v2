@@ -22,6 +22,30 @@ const creditsWarning = document.getElementById('creditsWarning');
 const togglePasswordBtn = document.getElementById('togglePassword');
 const signinPasswordInput = document.getElementById('signinPassword');
 
+// Jobs status elements
+const jobsStatus = document.getElementById('jobsStatus');
+const jobsStatusCount = document.getElementById('jobsStatusCount');
+const jobsStatusEmpty = document.getElementById('jobsStatusEmpty');
+const jobsStatusList = document.getElementById('jobsStatusList');
+
+let jobsPollingTimer = null;
+let currentUserIdForPolling = null;
+
+const stepLabels = {
+  queued: 'Queued',
+  starting: 'Starting',
+  fetching_profile: 'Fetching profile',
+  analyzing_job: 'Analyzing job',
+  creating_chat: 'Creating chat',
+  generating_content: 'Generating content',
+  generating_cover_letter: 'Generating cover letter',
+  generating_cv: 'Generating CV',
+  generating_interview_qa: 'Generating Interview Q&A',
+  generating_portfolio: 'Generating portfolio',
+  completed: 'Completed',
+  failed: 'Failed'
+};
+
 // Initialize popup
 async function init() {
   // Supabase is pre-configured, no need to check
@@ -59,6 +83,12 @@ async function init() {
         console.error('[Popup] Error refreshing credits:', err);
       });
     }
+
+    if (message.action === 'jobStatusChanged') {
+      if (currentUserIdForPolling && message.userId === currentUserIdForPolling) {
+        fetchAndRenderPendingJobs(currentUserIdForPolling).catch(() => {});
+      }
+    }
   });
 }
 
@@ -82,6 +112,7 @@ async function checkAuthStatus() {
 function showAuthForm() {
   authForm.classList.remove('hidden');
   authStatus.classList.add('hidden');
+  stopJobsPolling();
   clearMessages();
 }
 
@@ -93,6 +124,80 @@ async function showAuthStatus(user) {
   
   // Load and display credits balance
   await loadCreditsBalance(user.id);
+
+  startJobsPolling(user.id);
+}
+
+function stopJobsPolling() {
+  if (jobsPollingTimer) {
+    clearInterval(jobsPollingTimer);
+    jobsPollingTimer = null;
+  }
+  currentUserIdForPolling = null;
+}
+
+function startJobsPolling(userId) {
+  stopJobsPolling();
+  currentUserIdForPolling = userId;
+  if (!jobsStatus || !jobsStatusList || !jobsStatusEmpty) return;
+
+  fetchAndRenderPendingJobs(userId).catch(() => {});
+  jobsPollingTimer = setInterval(() => {
+    fetchAndRenderPendingJobs(userId).catch(() => {});
+  }, 1000);
+}
+
+async function fetchAndRenderPendingJobs(userId) {
+  if (!jobsStatus || !jobsStatusList || !jobsStatusEmpty) return;
+  const resp = await chrome.runtime.sendMessage({ action: 'getPendingJobs', userId });
+  if (!resp || !resp.success) return;
+  renderPendingJobs(resp.jobs || []);
+}
+
+function renderPendingJobs(jobs) {
+  if (!jobsStatusList || !jobsStatusEmpty || !jobsStatusCount) return;
+  const visible = Array.isArray(jobs) ? jobs : [];
+
+  jobsStatusCount.textContent = visible.length > 0 ? String(visible.length) : '';
+  jobsStatusList.innerHTML = '';
+
+  if (visible.length === 0) {
+    jobsStatusEmpty.classList.remove('hidden');
+    return;
+  }
+  jobsStatusEmpty.classList.add('hidden');
+
+  for (const job of visible) {
+    const title = String(job.title || 'Job').trim();
+    const company = String(job.company || '').trim();
+    const primary = company ? `${title} • ${company}` : title;
+
+    const status = String(job.status || '').toUpperCase();
+    const step = stepLabels[job.currentStep] || job.currentStep || '';
+    const queueInfo = job.queuePosition ? `#${job.queuePosition}` : '';
+    const stepLine = [queueInfo, step].filter(Boolean).join(' • ');
+
+    const item = document.createElement('div');
+    item.className = 'job-item';
+    item.innerHTML = `
+      <div class="job-item-top">
+        <div class="job-item-title" title="${escapeHtml(primary)}">${escapeHtml(primary)}</div>
+        <div class="job-item-status">${escapeHtml(status)}</div>
+      </div>
+      <div class="job-item-step">${escapeHtml(stepLine)}</div>
+      ${job.error ? `<div class="job-item-error">${escapeHtml(job.error)}</div>` : ''}
+    `;
+    jobsStatusList.appendChild(item);
+  }
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }
 
 // Setup event listeners
