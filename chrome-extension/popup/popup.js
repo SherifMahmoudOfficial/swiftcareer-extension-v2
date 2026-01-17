@@ -48,6 +48,9 @@ const stepLabels = {
 
 // Initialize popup
 async function init() {
+  // Start with loading state to avoid login form flash while checking session
+  showLoading(true);
+
   // Supabase is pre-configured, no need to check
   // Check authentication status
   await checkAuthStatus();
@@ -105,6 +108,8 @@ async function checkAuthStatus() {
   } catch (error) {
     console.error('Auth check error:', error);
     showAuthForm();
+  } finally {
+    showLoading(false);
   }
 }
 
@@ -123,7 +128,9 @@ async function showAuthStatus(user) {
   userEmail.textContent = user.email;
   
   // Load and display credits balance
-  await loadCreditsBalance(user.id);
+  loadCreditsBalance(user.id).catch((err) => {
+    console.error('Error loading credits balance:', err);
+  });
 
   startJobsPolling(user.id);
 }

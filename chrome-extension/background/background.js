@@ -1545,10 +1545,8 @@ async function generateContentAfterJobAnalysis(userId, chatThread, analysisResul
           .eq('thread_id', chatThread.id)
           .eq('metadata->>type', 'portfolio')
           .maybeSingle();
-        if (existing?.error) {
-          console.warn('[Background] ⚠️ Portfolio existence check failed (continuing):', existing.error);
-        }
-        if (existing?.data?.id) {
+        // NOTE: Our custom Supabase client returns row data directly (or null), not { data, error }.
+        if (existing?.id) {
           console.log('[Background] ℹ️ Portfolio already exists for this thread, skipping');
         } else {
           console.log('[Background] 🎨 Generating portfolio with Gemini...');

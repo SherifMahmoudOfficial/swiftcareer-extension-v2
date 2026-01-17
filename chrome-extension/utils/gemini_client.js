@@ -3,7 +3,7 @@
  * Used for Portfolio generation (HTML output)
  */
 
-const GEMINI_API_KEY = 'AIzaSyBqhQUmV6Mf2jLs5zDIioENRBe9Lxw4now';
+const GEMINI_API_KEY = 'AIzaSyAoZ24YIGF2uW3NjMTb4C3zv-PC8GpHE8c';
 const GEMINI_MODEL = 'gemini-3-flash-preview';
 const GEMINI_BASE_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 

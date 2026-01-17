@@ -41,7 +41,7 @@
     </div>
 
     <!-- Auth Form -->
-    <div id="authForm" class="auth-form">
+    <div id="authForm" class="auth-form hidden">
       <!-- Logo -->
       <div class="logo-container">
         <img src="../icons/logo.svg" alt="SwiftCareer" class="logo">
@@ -108,9 +108,19 @@
     </div>
 
     <!-- Loading State -->
-    <div id="loadingState" class="loading-state hidden">
-      <div class="spinner"></div>
-      <p>Processing...</p>
+    <div id="loadingState" class="loading-state">
+      <div class="skeleton">
+        <div class="skeleton-row">
+          <div class="skeleton-block skeleton-icon"></div>
+          <div class="skeleton-block skeleton-line skeleton-line-lg"></div>
+        </div>
+
+        <div class="skeleton-block skeleton-card"></div>
+
+        <div class="skeleton-block skeleton-card skeleton-card-tall"></div>
+
+        <div class="skeleton-block skeleton-button"></div>
+      </div>
     </div>
 
     <!-- Footer -->
